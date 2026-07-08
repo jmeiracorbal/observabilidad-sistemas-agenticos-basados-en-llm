@@ -56,7 +56,7 @@ class PlannerAssessment(BaseModel):
     task_understanding: str = ""
     hidden_reasoning: list[HiddenReasoningStep] = []
     decision_status: Literal["needs_more_context", "ready"] = "ready"
-    preliminary_action: Literal["math_agent", "time_agent", "researcher_agent", "direct_answer"] | None = None
+    preliminary_action: Literal["math_agent", "time_agent", "researcher_agent", "memory_agent", "direct_answer"] | None = None
     confidence: float = 0.0
 
     @field_validator("hidden_reasoning", mode="before")
@@ -66,7 +66,7 @@ class PlannerAssessment(BaseModel):
 
 
 class PlannerDecision(BaseModel):
-    selected_action: Literal["math_agent", "time_agent", "researcher_agent", "direct_answer"]
+    selected_action: Literal["math_agent", "time_agent", "researcher_agent", "memory_agent", "direct_answer"]
     arguments: dict[str, Any] = {}
     hidden_reasoning: list[HiddenReasoningStep] = []
     rationale: str = ""

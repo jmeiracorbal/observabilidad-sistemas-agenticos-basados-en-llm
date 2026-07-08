@@ -5,6 +5,7 @@
 from agents.model_call_builder import build_model_call_record
 from agents.observability_helpers import record_decision, utc_now
 from llm.gateway import get_model_name, invoke_llm
+from llm.prompt_xml import append_internal_context
 from memory.service import search_memory
 from observability.decorators import span
 from observability.tracer import Tracer
@@ -13,6 +14,11 @@ from tools.web_search import web_search
 
 _SEEDED_DOC = "observabilidad.md"
 _RESEARCH_TOOLS = ("memory.search", "web_search", "file_reader", "llm_synthesis")
+
+_RESEARCHER_SYSTEM = (
+    "Sintetiza en un párrafo lo relevante sobre el tema del usuario. "
+    "Usa el bloque <internal_context>; devuelve solo la síntesis, sin etiquetas XML."
+)
 
 
 class ResearcherAgent:
@@ -112,12 +118,13 @@ class ResearcherAgent:
                 payload={"path": _SEEDED_DOC, "words": len(doc_content.split())},
             )
 
-            prompt = (
-                f"Sintetiza en un parrafo lo relevante sobre: {topic}\n\n"
-                f"Memoria previa:\n{memory_context}\n\n"
-                f"Busqueda web (simulada):\n{web_context}\n\n"
-                f"Documento local:\n{doc_content}"
+            system, _ = append_internal_context(
+                _RESEARCHER_SYSTEM,
+                memory_results=memory_context,
+                web_search_results=web_context,
+                local_document=doc_content,
             )
+            prompt = topic
             record_decision(
                 self._tracer,
                 researcher_span.id,
@@ -127,15 +134,16 @@ class ResearcherAgent:
                 "ResearcherAgent solicita al LLM sintetizar memoria, búsqueda simulada y documento local.",
                 available_tools=["llm_synthesis"],
                 selected_tools=["llm_synthesis"],
+                payload={"prompt": prompt, "system": system},
             )
             llm_started = utc_now()
-            output, tokens = invoke_llm(prompt, purpose="research_synthesis")
+            output, tokens = invoke_llm(prompt, system=system, purpose="research_synthesis")
             llm_ended = utc_now()
             self._tracer.record_model_call(
                 researcher_span.id,
                 build_model_call_record(
                     model=get_model_name(),
-                    system="",
+                    system=system,
                     prompt=prompt,
                     output=output,
                     input_tokens=tokens.input,

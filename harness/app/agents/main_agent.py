@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from agents.model_call_builder import build_model_call_record
+from agents.memory_agent import MemoryAgent, memory_operation
 from agents.math_agent import MathAgent
-from agents.observability_helpers import record_decision, utc_now
+from agents.observability_helpers import record_autorepair_flow, record_decision, record_retry_flow, utc_now
 from agents.planner_agent import PlannerAgent, _PLANNER_SYSTEM, _validate_or_repair_plan
 from agents.registry import action_names, public_catalog
 from agents.researcher_agent import ResearcherAgent
@@ -17,6 +18,7 @@ from agents.writer_agent import WriterAgent
 from conversation.context_window import apply_context_window_policy
 from conversation.service import ConversationService
 from llm.gateway import get_model_name, invoke_llm
+from llm.prompt_xml import append_internal_context
 from observability.decorators import span
 from observability.models import TokenUsage
 from observability.run_events import emit_run_event
@@ -24,7 +26,37 @@ from observability.tracer import Tracer
 
 _MAIN_ACTIONS = action_names()
 
-_FINAL_SYSTEM = "Responde al usuario con la observación recibida. Sé breve."
+_FINAL_RESPONSE_MAX_ATTEMPTS = 3
+
+_DIRECT_ANSWER_SYSTEM = (
+    "Eres el asistente que responde al usuario en español. "
+    "Responde en una o dos frases cortas, directas y naturales. "
+    "El bloque <internal_context> es solo para ti. "
+    "Devuelve únicamente la respuesta al usuario: sin etiquetas XML, sin metadata interna "
+    "ni menciones a agentes, herramientas o runtime."
+)
+
+_FINAL_SYSTEM = (
+    "Eres el asistente que responde al usuario en español. "
+    "El bloque <internal_context> contiene el historial y el dato calculado por el runtime. "
+    "Responde en una o dos frases cortas, directas y naturales e incorpora el dato calculado. "
+    "Devuelve únicamente la respuesta al usuario: sin etiquetas XML ni citas del contexto interno."
+)
+
+_FINAL_RETRY_SYSTEM = (
+    "Eres el asistente que responde al usuario en español. "
+    "Tu respuesta anterior fue inválida: no incorporó el dato calculado o filtró contexto interno/XML. "
+    "Corrige y devuelve solo la respuesta al usuario en una frase corta con el dato calculado."
+)
+
+
+@dataclass
+class FinalPromptContext:
+    system: str
+    prompt: str
+    forbidden_echoes: tuple[str, ...]
+    required_inclusion: str | None = None
+    contract_evidence: str | None = None
 
 
 @dataclass
@@ -44,6 +76,7 @@ class MainAgent:
         self._conversations = ConversationService()
         self._planner = PlannerAgent(tracer)
         self._math = MathAgent(tracer)
+        self._memory = MemoryAgent(tracer)
         self._time = TimeAgent(tracer)
         self._researcher = ResearcherAgent(tracer)
         self._writer = WriterAgent(tracer)
@@ -116,7 +149,17 @@ class MainAgent:
                     payload={"source_agent": "PlannerAgent", "plan": planner_plan},
                 )
                 plan = _validate_plan_contract(planner_plan, user_input)
-                plan = _validate_or_repair_plan(plan, user_input)
+                plan, repair = _validate_or_repair_plan(plan, user_input)
+                if repair:
+                    record_autorepair_flow(
+                        self._tracer,
+                        main_span.id,
+                        "MainAgent",
+                        user_input,
+                        available_tools=list(_MAIN_ACTIONS),
+                        selected_tools=[] if plan["selected_action"] == "direct_answer" else [plan["selected_action"]],
+                        **repair,
+                    )
                 selected_action = str(plan["selected_action"])
                 selected = [] if selected_action == "direct_answer" else [selected_action]
                 record_decision(
@@ -208,6 +251,36 @@ class MainAgent:
                 user_input,
                 "MainAgent recibe de TimeAgent la observación normalizada de hora/fecha.",
                 available_tools=["time_agent"],
+                payload=observation,
+            )
+            return observation
+
+        if selected_action == "memory_agent":
+            operation = memory_operation(user_input)
+            if operation is None:
+                operation = arguments.get("operation")
+            if operation not in {"save", "recall"}:
+                raise ValueError(f"operación de memoria no soportada: {operation}")
+            record_decision(
+                self._tracer,
+                span_id,
+                "MainAgent",
+                "subagent_call_request",
+                user_input,
+                "MainAgent delega la operación de memoria en MemoryAgent.",
+                available_tools=list(_MAIN_ACTIONS),
+                selected_tools=["memory_agent"],
+                payload={"target_agent": "MemoryAgent", "arguments": {"task": delegated_task, "operation": operation}},
+            )
+            observation = self._memory.run(run_id, delegated_task, operation, span_id)
+            record_decision(
+                self._tracer,
+                span_id,
+                "MainAgent",
+                "subagent_call_response",
+                user_input,
+                "MainAgent recibe de MemoryAgent la observación de memoria.",
+                available_tools=["memory_agent"],
                 payload=observation,
             )
             return observation
@@ -347,52 +420,133 @@ class MainAgent:
         observation: dict[str, Any],
         conversation: ConversationContext,
     ) -> str:
-        result = observation.get("result", observation)
+        selected_action = str(plan["selected_action"])
+        if selected_action == "direct_answer":
+            return self._produce_direct_answer(span_id, user_input, plan, conversation)
+
+        result_text = str(observation.get("result", observation))
         history_block = conversation.history_text or "(sin historial previo)"
-        final_prompt = (
-            f"Historial:\n{history_block}\n\n"
-            f"Usuario: {user_input}\n"
-            f"Observación: {result}\n"
-            "Respuesta:"
-        )
-        record_decision(
-            self._tracer,
-            span_id,
-            "MainAgent",
-            "final_model_request",
-            user_input,
-            "MainAgent consulta al LLM final con la observación ya producida por el runtime/subagente.",
-            available_tools=[str(plan["selected_action"])],
-            payload={"prompt": final_prompt, "system": _FINAL_SYSTEM},
-        )
+        rejected_output: str | None = None
+
         try:
-            final_output, tokens = self._invoke_observed_llm(
-                span_id,
-                final_prompt,
-                _FINAL_SYSTEM,
-                purpose="final_response",
-                components={
-                    "system_prompt": _FINAL_SYSTEM,
-                    "history": history_block,
-                    "user_message": user_input,
-                    "observation": str(result),
-                },
-                remaining_input_tokens=conversation.remaining_input_tokens,
-                output_reserve_tokens=conversation.output_reserve_tokens,
-                summarized=conversation.summarized,
-                truncated=conversation.truncated,
-            )
-            record_decision(
+            for attempt in range(_FINAL_RESPONSE_MAX_ATTEMPTS):
+                attempt_number = attempt + 1
+                is_retry = attempt > 0
+                prompt_context = _build_subagent_final_context(
+                    history_block,
+                    user_input,
+                    result_text,
+                    selected_action,
+                    is_retry=is_retry,
+                    rejected_output=rejected_output,
+                )
+                purpose = "final_response_retry" if is_retry else "final_response"
+
+                record_decision(
+                    self._tracer,
+                    span_id,
+                    "MainAgent",
+                    "final_model_request",
+                    user_input,
+                    (
+                        "MainAgent reintenta la respuesta final con un prompt correctivo."
+                        if is_retry
+                        else "MainAgent consulta al LLM final con el resultado ya producido por el runtime/subagente."
+                    ),
+                    available_tools=[selected_action],
+                    payload={
+                        "prompt": prompt_context.prompt,
+                        "system": prompt_context.system,
+                        "attempt": attempt_number,
+                        "max_attempts": _FINAL_RESPONSE_MAX_ATTEMPTS,
+                        "is_retry": is_retry,
+                        **({"rejected_output": rejected_output} if rejected_output else {}),
+                    },
+                )
+                final_output, tokens = self._invoke_observed_llm(
+                    span_id,
+                    prompt_context.prompt,
+                    prompt_context.system,
+                    purpose=purpose,
+                    components={
+                        "system_prompt": prompt_context.system,
+                        "history": history_block,
+                        "user_message": user_input,
+                        "observation": result_text,
+                        "attempt": str(attempt_number),
+                        **({"rejected_output": rejected_output} if rejected_output else {}),
+                    },
+                    remaining_input_tokens=conversation.remaining_input_tokens,
+                    output_reserve_tokens=conversation.output_reserve_tokens,
+                    summarized=conversation.summarized,
+                    truncated=conversation.truncated,
+                )
+                record_decision(
+                    self._tracer,
+                    span_id,
+                    "LLM Final",
+                    "final_model_response",
+                    user_input,
+                    "El LLM final devuelve el texto de respuesta a MainAgent.",
+                    available_tools=[selected_action],
+                    payload={
+                        "output": final_output,
+                        "attempt": attempt_number,
+                        "max_attempts": _FINAL_RESPONSE_MAX_ATTEMPTS,
+                        "is_retry": is_retry,
+                    },
+                )
+                violation_type = _final_response_violation(final_output, prompt_context)
+                if violation_type is None:
+                    return final_output
+
+                rejected_output = final_output
+                contract_evidence = prompt_context.contract_evidence or result_text
+                if attempt < _FINAL_RESPONSE_MAX_ATTEMPTS - 1:
+                    record_retry_flow(
+                        self._tracer,
+                        span_id,
+                        "MainAgent",
+                        user_input,
+                        phase="final_response",
+                        violation_type=violation_type,
+                        evidence=contract_evidence,
+                        from_value=final_output,
+                        attempt=attempt_number,
+                        max_attempts=_FINAL_RESPONSE_MAX_ATTEMPTS,
+                        next_attempt=attempt_number + 1,
+                        rationale=_retry_rationale(violation_type, contract_evidence),
+                        before={"output": final_output, "expected": contract_evidence, "violation_type": violation_type},
+                        after={"strategy": "llm_corrective_prompt", "next_attempt": attempt_number + 1},
+                        available_tools=[selected_action],
+                        selected_tools=[selected_action],
+                    )
+
+            fallback = _fallback_final_response(plan, observation)
+            record_autorepair_flow(
                 self._tracer,
                 span_id,
-                "LLM Final",
-                "final_model_response",
+                "MainAgent",
                 user_input,
-                "El LLM final devuelve el texto de respuesta a MainAgent.",
-                available_tools=[str(plan["selected_action"])],
-                payload={"output": final_output},
+                phase="final_response",
+                conflict_type="contract_violation_after_retries",
+                evidence=contract_evidence,
+                from_value=rejected_output or "",
+                to_value=fallback,
+                before={
+                    "llm_output": rejected_output,
+                    "expected": contract_evidence,
+                    "attempts": _FINAL_RESPONSE_MAX_ATTEMPTS,
+                },
+                after={"response": fallback},
+                rationale=(
+                    f"El LLM final no cumplió el contrato tras {_FINAL_RESPONSE_MAX_ATTEMPTS} intentos; "
+                    "MainAgent usa la respuesta determinista."
+                ),
+                available_tools=[selected_action],
+                selected_tools=[selected_action],
             )
-            return final_output
+            return fallback
         except Exception as exc:
             self._tracer.record_error(span_id, exc)
             fallback = _fallback_final_response(plan, observation)
@@ -403,10 +557,126 @@ class MainAgent:
                 "fallback_event",
                 user_input,
                 f"No se pudo generar respuesta final con LLM; MainAgent usa fallback textual: {fallback}",
-                available_tools=[str(plan["selected_action"])],
+                available_tools=[selected_action],
                 payload={"error": str(exc), "fallback_response": fallback},
             )
             return fallback
+
+    def _produce_direct_answer(
+        self,
+        span_id: str,
+        user_input: str,
+        plan: dict[str, Any],
+        conversation: ConversationContext,
+    ) -> str:
+        history_block = conversation.history_text or "(sin historial previo)"
+        selected_action = str(plan["selected_action"])
+        rejected_output: str | None = None
+
+        try:
+            for attempt in range(_FINAL_RESPONSE_MAX_ATTEMPTS):
+                attempt_number = attempt + 1
+                is_retry = attempt > 0
+                prompt_context = _build_direct_answer_context(
+                    history_block,
+                    user_input,
+                    is_retry=is_retry,
+                    rejected_output=rejected_output,
+                )
+                purpose = "final_response_retry" if is_retry else "final_response"
+
+                record_decision(
+                    self._tracer,
+                    span_id,
+                    "MainAgent",
+                    "final_model_request",
+                    user_input,
+                    (
+                        "MainAgent reintenta la respuesta directa con un prompt correctivo."
+                        if is_retry
+                        else "MainAgent consulta al LLM final para responder sin subagente de dominio."
+                    ),
+                    available_tools=[selected_action],
+                    payload={
+                        "prompt": prompt_context.prompt,
+                        "system": prompt_context.system,
+                        "attempt": attempt_number,
+                        "max_attempts": _FINAL_RESPONSE_MAX_ATTEMPTS,
+                        "is_retry": is_retry,
+                        **({"rejected_output": rejected_output} if rejected_output else {}),
+                    },
+                )
+                final_output, tokens = self._invoke_observed_llm(
+                    span_id,
+                    prompt_context.prompt,
+                    prompt_context.system,
+                    purpose=purpose,
+                    components={
+                        "system_prompt": prompt_context.system,
+                        "history": history_block,
+                        "user_message": user_input,
+                        "attempt": str(attempt_number),
+                        **({"rejected_output": rejected_output} if rejected_output else {}),
+                    },
+                    remaining_input_tokens=conversation.remaining_input_tokens,
+                    output_reserve_tokens=conversation.output_reserve_tokens,
+                    summarized=conversation.summarized,
+                    truncated=conversation.truncated,
+                )
+                record_decision(
+                    self._tracer,
+                    span_id,
+                    "LLM Final",
+                    "final_model_response",
+                    user_input,
+                    "El LLM final devuelve el texto de respuesta a MainAgent.",
+                    available_tools=[selected_action],
+                    payload={
+                        "output": final_output,
+                        "attempt": attempt_number,
+                        "max_attempts": _FINAL_RESPONSE_MAX_ATTEMPTS,
+                        "is_retry": is_retry,
+                    },
+                )
+                violation_type = _final_response_violation(final_output, prompt_context)
+                if violation_type is None:
+                    return final_output
+
+                rejected_output = final_output
+                if attempt < _FINAL_RESPONSE_MAX_ATTEMPTS - 1:
+                    record_retry_flow(
+                        self._tracer,
+                        span_id,
+                        "MainAgent",
+                        user_input,
+                        phase="final_response",
+                        violation_type=violation_type,
+                        evidence="respuesta sin metadata interna",
+                        from_value=final_output,
+                        attempt=attempt_number,
+                        max_attempts=_FINAL_RESPONSE_MAX_ATTEMPTS,
+                        next_attempt=attempt_number + 1,
+                        rationale=_retry_rationale(violation_type, "respuesta sin metadata interna"),
+                        before={"output": final_output, "violation_type": violation_type},
+                        after={"strategy": "llm_corrective_prompt", "next_attempt": attempt_number + 1},
+                        available_tools=[selected_action],
+                        selected_tools=[selected_action],
+                    )
+
+            raise RuntimeError("el LLM final filtró contexto interno tras agotar reintentos")
+        except Exception as exc:
+            self._tracer.record_error(span_id, exc)
+            record_decision(
+                self._tracer,
+                span_id,
+                "MainAgent",
+                "fallback_event",
+                user_input,
+                f"No se pudo generar respuesta directa con LLM: {exc}",
+                available_tools=[selected_action],
+                payload={"error": str(exc)},
+            )
+            raise
 
     def _invoke_observed_llm(
         self,
@@ -451,8 +721,13 @@ def _validate_plan_contract(plan: dict[str, Any], user_input: str) -> dict[str, 
         raise ValueError(f"acción no disponible en AgentRegistry: {selected_action}")
 
     arguments = _normalize_arguments(plan.get("arguments"))
-    if selected_action in {"math_agent", "time_agent", "direct_answer"}:
+    if selected_action in {"math_agent", "time_agent", "direct_answer", "memory_agent"}:
         arguments = {**arguments, "task": user_input}
+    if selected_action == "memory_agent":
+        operation = arguments.get("operation") or memory_operation(user_input)
+        if operation is None:
+            raise ValueError("memory_agent requiere operación save o recall derivable del mensaje")
+        arguments = {**arguments, "operation": operation}
     if selected_action == "researcher_agent" and not (arguments.get("topic") or arguments.get("task")):
         arguments = {**arguments, "topic": user_input}
 
@@ -465,6 +740,58 @@ def _normalize_arguments(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _build_direct_answer_context(
+    history_block: str,
+    user_input: str,
+    *,
+    is_retry: bool,
+    rejected_output: str | None,
+) -> FinalPromptContext:
+    sections: dict[str, str] = {"conversation_history": history_block}
+    if is_retry and rejected_output:
+        sections["rejected_attempt"] = rejected_output
+    base_system = _FINAL_RETRY_SYSTEM if is_retry else _DIRECT_ANSWER_SYSTEM
+    system, forbidden_echoes = append_internal_context(base_system, **sections)
+    return FinalPromptContext(
+        system=system,
+        prompt=user_input,
+        forbidden_echoes=forbidden_echoes,
+    )
+
+
+def _build_subagent_final_context(
+    history_block: str,
+    user_input: str,
+    result: str,
+    selected_action: str,
+    *,
+    is_retry: bool,
+    rejected_output: str | None,
+) -> FinalPromptContext:
+    sections: dict[str, str] = {
+        "conversation_history": history_block,
+        "runtime_result": result,
+    }
+    if is_retry and rejected_output:
+        sections["rejected_attempt"] = rejected_output
+    base_system = _FINAL_RETRY_SYSTEM if is_retry else _FINAL_SYSTEM
+    system, forbidden_echoes = append_internal_context(base_system, **sections)
+    required_inclusion = result if selected_action in {"math_agent", "time_agent"} else None
+    return FinalPromptContext(
+        system=system,
+        prompt=user_input,
+        forbidden_echoes=forbidden_echoes,
+        required_inclusion=required_inclusion,
+        contract_evidence=required_inclusion or result,
+    )
+
+
+def _retry_rationale(violation_type: str, evidence: str) -> str:
+    if violation_type == "echoes_internal_context":
+        return "La salida filtró contexto interno; MainAgent reintenta con prompt correctivo."
+    return f"La salida no cumple el contrato ({evidence}); MainAgent reintenta con prompt correctivo."
+
+
 def _fallback_final_response(plan: dict[str, Any], observation: dict[str, Any]) -> str:
     selected_action = str(plan.get("selected_action"))
     if selected_action == "math_agent":
@@ -472,6 +799,24 @@ def _fallback_final_response(plan: dict[str, Any], observation: dict[str, Any]) 
         return f"El resultado de {expression} es {observation.get('result')}."
     if selected_action == "time_agent":
         return f"La hora actual en UTC es {observation.get('result')}."
+    if selected_action == "memory_agent":
+        return str(observation.get("result", "No se pudo completar la operación de memoria."))
     if selected_action == "researcher_agent":
         return str(observation.get("result", "No se pudo generar una respuesta."))
-    return str(observation.get("result", "Respuesta generada sin herramienta externa."))
+    raise ValueError(f"no hay fallback determinista para la acción {selected_action}")
+
+
+def _final_response_violation(llm_output: str, prompt_context: FinalPromptContext) -> str | None:
+    actual = llm_output.strip()
+    if not actual:
+        return "empty_output"
+
+    for marker in prompt_context.forbidden_echoes:
+        if marker in actual:
+            return "echoes_internal_context"
+
+    required = prompt_context.required_inclusion
+    if required and required.lower() not in actual.lower():
+        return "missing_expected_result"
+
+    return None

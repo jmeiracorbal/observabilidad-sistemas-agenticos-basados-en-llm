@@ -5,11 +5,17 @@
 from agents.model_call_builder import build_model_call_record
 from agents.observability_helpers import record_decision, utc_now
 from llm.gateway import get_model_name, invoke_llm
+from llm.prompt_xml import append_internal_context
 from memory.service import save_memory
 from observability.decorators import span
 from observability.tracer import Tracer
 
 _WRITER_TOOLS = ("llm_draft", "memory.save")
+
+_WRITER_SYSTEM = (
+    "Redacta un documento breve y estructurado sobre el tema del usuario. "
+    "Usa el bloque <internal_context>; devuelve solo el documento, sin etiquetas XML."
+)
 
 
 class WriterAgent:
@@ -37,10 +43,11 @@ class WriterAgent:
                 available_tools=list(_WRITER_TOOLS),
                 selected_tools=list(_WRITER_TOOLS),
             )
-            prompt = (
-                f"Redacta un documento breve y estructurado sobre: {topic}\n\n"
-                f"Investigacion previa:\n{research_output}"
+            system, _ = append_internal_context(
+                _WRITER_SYSTEM,
+                research_output=research_output,
             )
+            prompt = topic
             record_decision(
                 self._tracer,
                 writer_span.id,
@@ -50,15 +57,16 @@ class WriterAgent:
                 "WriterAgent solicita al LLM redactar el documento final a partir de la investigación.",
                 available_tools=["llm_draft"],
                 selected_tools=["llm_draft"],
+                payload={"prompt": prompt, "system": system},
             )
             llm_started = utc_now()
-            output, tokens = invoke_llm(prompt, purpose="writer_draft")
+            output, tokens = invoke_llm(prompt, system=system, purpose="writer_draft")
             llm_ended = utc_now()
             self._tracer.record_model_call(
                 writer_span.id,
                 build_model_call_record(
                     model=get_model_name(),
-                    system="",
+                    system=system,
                     prompt=prompt,
                     output=output,
                     input_tokens=tokens.input,

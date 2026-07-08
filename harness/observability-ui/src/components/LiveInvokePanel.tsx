@@ -7,10 +7,13 @@ import { LiveStreamCard } from './LiveStreamCard';
 import type { ModelCall, TimelineItem, TurnTokenSummary } from '../types';
 import type { InvokeStreamState, LlmStreamState } from '../types-stream';
 
+const FINAL_RESPONSE_PURPOSES = new Set(['final_response', 'final_response_retry']);
+
 const PURPOSE_LABELS: Record<string, string> = {
   planner_assessment: 'análisis',
   planner_decision: 'decisión',
   final_response: 'Respuesta',
+  final_response_retry: 'Respuesta',
   research_synthesis: 'Investigación',
   writer_draft: 'Redacción',
 };
@@ -23,6 +26,7 @@ const STREAM_ORDER = [
   'research_synthesis',
   'writer_draft',
   'final_response',
+  'final_response_retry',
 ];
 
 function initialState(): InvokeStreamState {
@@ -115,6 +119,7 @@ export function LiveInvokePanel({
   activeConversationId,
   sessionKey,
   contextSummary,
+  idleTurnIndex,
   onConversationChanged,
   onRunningChange,
   onRunStarted,
@@ -123,6 +128,7 @@ export function LiveInvokePanel({
   activeConversationId?: string;
   sessionKey: number;
   contextSummary?: TurnTokenSummary | null;
+  idleTurnIndex?: number;
   onConversationChanged: (conversationId: string | undefined) => void;
   onRunningChange: (running: boolean) => void;
   onRunStarted: (runId: string) => void;
@@ -133,6 +139,7 @@ export function LiveInvokePanel({
   const [decisionsOpen, setDecisionsOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const streamEndRef = useRef<HTMLDivElement | null>(null);
+  const previousConversationIdRef = useRef<string | undefined>(activeConversationId);
 
   useEffect(() => {
     streamEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -148,6 +155,23 @@ export function LiveInvokePanel({
     setDecisionsOpen(false);
     setMessage('');
   }, [sessionKey]);
+
+  useEffect(() => {
+    const previous = previousConversationIdRef.current;
+    if (previous === activeConversationId) {
+      return;
+    }
+    previousConversationIdRef.current = activeConversationId;
+
+    if (previous === undefined || activeConversationId === undefined) {
+      return;
+    }
+
+    abortRef.current?.abort();
+    setState(initialState());
+    setDecisionsOpen(false);
+    setMessage('');
+  }, [activeConversationId]);
 
   useEffect(() => {
     if (state.status === 'running') {
@@ -291,8 +315,10 @@ export function LiveInvokePanel({
   const streamEntries = sortStreams(Object.values(state.llmStreams));
   const decisionStreams = streamEntries.filter((stream) => DECISION_PURPOSES.has(stream.purpose));
   const visibleStreams = streamEntries.filter((stream) => !DECISION_PURPOSES.has(stream.purpose));
-  const responseStream = visibleStreams.find((stream) => stream.purpose === 'final_response');
-  const pipelineStreams = visibleStreams.filter((stream) => stream.purpose !== 'final_response');
+  const responseStream = [...visibleStreams]
+    .reverse()
+    .find((stream) => FINAL_RESPONSE_PURPOSES.has(stream.purpose));
+  const pipelineStreams = visibleStreams.filter((stream) => !FINAL_RESPONSE_PURPOSES.has(stream.purpose));
   const decisionsStreaming = decisionStreams.some((stream) => stream.status === 'streaming');
 
   const conversationContext = useMemo<TurnTokenSummary>(() => {
@@ -331,7 +357,7 @@ export function LiveInvokePanel({
     <section className="panel live-invoke-panel">
       <ConversationContextBar summary={conversationContext} />
       <div className="live-invoke-panel__body">
-      <p className="live-invoke-meta muted">Turno {state.turnIndex ?? 0}</p>
+      <p className="live-invoke-meta muted">Turno {state.turnIndex ?? idleTurnIndex ?? 0}</p>
 
       <div className="live-invoke-compose">
         <textarea
@@ -360,7 +386,7 @@ export function LiveInvokePanel({
 
       {state.error && <div className="alert alert-error">{state.error}</div>}
 
-      {(state.status === 'running' || streamEntries.length > 0) && (
+      {(state.status === 'running' || state.status === 'completed' || streamEntries.length > 0) && (
         <div className="live-stream-stack">
           {decisionStreams.length > 0 && (
             <details
@@ -398,12 +424,25 @@ export function LiveInvokePanel({
             />
           ))}
 
-          {responseStream && (
+          {responseStream ? (
             <LiveStreamCard
               key={responseStream.purpose}
               stream={responseStream}
               label={PURPOSE_LABELS[responseStream.purpose] ?? responseStream.purpose}
             />
+          ) : (
+            state.status === 'completed' &&
+            state.response?.trim() && (
+              <LiveStreamCard
+                key="final_response"
+                stream={{
+                  purpose: 'final_response',
+                  text: state.response,
+                  status: 'completed',
+                }}
+                label={PURPOSE_LABELS.final_response}
+              />
+            )
           )}
           <div ref={streamEndRef} />
         </div>

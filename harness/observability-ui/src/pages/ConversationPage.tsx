@@ -11,6 +11,7 @@ export function ConversationPage({
   activeConversationId,
   invokeSessionKey,
   turnTokenSummary,
+  idleTurnIndex,
   onConversationChanged,
   onRunningChange,
   onRunStarted,
@@ -21,6 +22,7 @@ export function ConversationPage({
   activeConversationId?: string;
   invokeSessionKey: number;
   turnTokenSummary: TurnTokenSummary | null;
+  idleTurnIndex?: number;
   onConversationChanged: (conversationId: string | undefined) => void;
   onRunningChange: (running: boolean) => void;
   onRunStarted: (runId: string) => void;
@@ -41,6 +43,7 @@ export function ConversationPage({
         activeConversationId={activeConversationId}
         sessionKey={invokeSessionKey}
         contextSummary={turnTokenSummary}
+        idleTurnIndex={idleTurnIndex}
         onConversationChanged={onConversationChanged}
         onRunningChange={onRunningChange}
         onRunStarted={onRunStarted}

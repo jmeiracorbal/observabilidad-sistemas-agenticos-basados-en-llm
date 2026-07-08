@@ -2,7 +2,7 @@ import type { ModelCall, TimelineItem, TurnTokenSummary } from '../types';
 
 export type { TurnTokenSummary };
 
-const FINAL_PURPOSE = 'final_response';
+const FINAL_RESPONSE_PURPOSES = new Set(['final_response', 'final_response_retry']);
 
 function modelCallFromItem(item: TimelineItem): ModelCall | undefined {
   const payload = item.payload as { model_call?: ModelCall } | undefined;
@@ -94,7 +94,7 @@ export function summarizeTurnTokens(timeline: TimelineItem[], userInput: string)
       context_window = metadata.context_window;
     }
 
-    if (purpose === FINAL_PURPOSE) {
+    if (FINAL_RESPONSE_PURPOSES.has(purpose)) {
       final_output_tokens = outputTokens;
       user_input_tokens = breakdownValue(metadata, 'user_message') || estimateTokens(userInput);
       continue;

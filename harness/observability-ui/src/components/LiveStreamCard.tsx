@@ -82,7 +82,7 @@ function StreamTokenBadges({ stream }: { stream: LlmStreamState }) {
     return null;
   }
 
-  if (stream.purpose === 'final_response') {
+  if (stream.purpose === 'final_response' || stream.purpose === 'final_response_retry') {
     return (
       <span className="live-stream-card__metrics">
         <TokenBadge label="tokens out" value={stream.output_tokens ?? 0} />

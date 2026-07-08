@@ -50,6 +50,76 @@ export interface PlanningOutcome {
   hiddenReasoning: unknown[];
 }
 
+export interface AutorepairFlow {
+  phase: string;
+  conflict: TimelineItem;
+  decision: TimelineItem;
+  applied: TimelineItem;
+}
+
+const PLANNING_AUTOREPAIR_PHASES = new Set(['assessment', 'decision_parse', 'planning']);
+
+function autorepairStage(item: TimelineItem): string | undefined {
+  const decision = decisionFromItem(item);
+  if (decision?.stage) {
+    return decision.stage;
+  }
+  return item.title;
+}
+
+function autorepairPayload(item: TimelineItem): Record<string, unknown> {
+  const decision = decisionFromItem(item);
+  return (decision?.payload ?? item.content ?? {}) as Record<string, unknown>;
+}
+
+export function extractAutorepairFlows(timeline: TimelineItem[]): AutorepairFlow[] {
+  const flows: AutorepairFlow[] = [];
+  let current: Partial<AutorepairFlow> = {};
+
+  for (const item of timeline) {
+    if (item.kind !== 'decision') {
+      continue;
+    }
+    const stage = autorepairStage(item);
+    if (stage === 'autorepair_conflict_detected') {
+      if (current.conflict && current.decision && current.applied) {
+        flows.push(current as AutorepairFlow);
+      }
+      current = {
+        phase: String(autorepairPayload(item).phase ?? 'unknown'),
+        conflict: item,
+      };
+      continue;
+    }
+    if (stage === 'autorepair_decision' && current.conflict) {
+      current.decision = item;
+      continue;
+    }
+    if (stage === 'autorepair_applied' && current.decision) {
+      current.applied = item;
+      flows.push(current as AutorepairFlow);
+      current = {};
+    }
+  }
+
+  return flows;
+}
+
+export function extractPlanningAutorepairFlows(timeline: TimelineItem[]): AutorepairFlow[] {
+  return extractAutorepairFlows(timeline).filter((flow) => PLANNING_AUTOREPAIR_PHASES.has(flow.phase));
+}
+
+const PHASE_LABELS: Record<string, string> = {
+  assessment: 'Assessment',
+  decision_parse: 'Decisión (parse)',
+  planning: 'Planificación',
+  final_response: 'Respuesta final',
+};
+
+export function autorepairPhaseLabel(phase: string): string {
+  return PHASE_LABELS[phase] ?? phase;
+}
+
 export function extractPlanningOutcome(timeline: TimelineItem[]): PlanningOutcome | null {
   for (let index = timeline.length - 1; index >= 0; index -= 1) {
     const decision = decisionFromItem(timeline[index]);

@@ -5,6 +5,7 @@ import { getRunTimeline } from '../api';
 import { ArtifactGraph } from '../components/ArtifactGraph';
 import { EventInspector } from '../components/EventInspector';
 import { PlanningView } from '../components/PlanningView';
+import { ResponseView } from '../components/ResponseView';
 import { RunSummary } from '../components/RunSummary';
 import { TimelineView } from '../components/TimelineView';
 import type { RunTimelineResponse, TimelineItem } from '../types';
@@ -23,7 +24,7 @@ export function MessageDetailPage({
   const [selectedItem, setSelectedItem] = useState<TimelineItem | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<'timeline' | 'graph' | 'planning'>('timeline');
+  const [activeView, setActiveView] = useState<'timeline' | 'graph' | 'planning' | 'response'>('timeline');
 
   useEffect(() => {
     const controller = new AbortController();
@@ -119,6 +120,13 @@ export function MessageDetailPage({
               >
                 Planificación
               </button>
+              <button
+                className={activeView === 'response' ? 'tab tab--active' : 'tab'}
+                type="button"
+                onClick={() => setActiveView('response')}
+              >
+                Respuesta
+              </button>
             </div>
           </nav>
 
@@ -133,6 +141,10 @@ export function MessageDetailPage({
 
           {activeView === 'planning' && (
             <PlanningView timeline={runTimeline.timeline} runStatus={runTimeline.run.status} />
+          )}
+
+          {activeView === 'response' && (
+            <ResponseView timeline={runTimeline.timeline} runStatus={runTimeline.run.status} />
           )}
         </>
       )}

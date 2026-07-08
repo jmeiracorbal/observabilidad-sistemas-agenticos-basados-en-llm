@@ -59,6 +59,22 @@ AGENT_REGISTRY: dict[str, dict] = {
         "public_tools": [],
         "task_contract": {"task": "texto original del usuario"},
     },
+    "memory_agent": {
+        "owner": "MainAgent",
+        "target_agent": "MemoryAgent",
+        "capabilities": [
+            "Guardar hechos del usuario en memoria persistente (mnemo).",
+            "Recuperar hechos previamente guardados del usuario.",
+        ],
+        "public_tools": [
+            {"name": "memory.search", "owner_agent": "MemoryAgent", "description": "Consulta memoria persistente."},
+            {"name": "memory.save", "owner_agent": "MemoryAgent", "description": "Persiste un hecho del usuario en memoria."},
+        ],
+        "task_contract": {
+            "task": "texto original del usuario",
+            "operation": "save | recall",
+        },
+    },
 }
 
 

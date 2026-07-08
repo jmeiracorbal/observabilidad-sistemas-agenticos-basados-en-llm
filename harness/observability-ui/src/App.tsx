@@ -39,7 +39,17 @@ function App() {
   const [activeConversationId, setActiveConversationId] = useState<string>();
   const [invokeSessionKey, setInvokeSessionKey] = useState(0);
   const [invokeRunning, setInvokeRunning] = useState(false);
-  const [previewTokenSummary, setPreviewTokenSummary] = useState<ReturnType<typeof summarizeTurnTokens> | null>(null);
+  const [conversationTokenSummary, setConversationTokenSummary] =
+    useState<ReturnType<typeof summarizeTurnTokens> | null>(null);
+
+  const latestConversationRun = useMemo(() => {
+    if (!activeConversationId) {
+      return undefined;
+    }
+    return runs
+      .filter((run) => run.conversation_id === activeConversationId)
+      .sort((left, right) => right.turn_index - left.turn_index)[0];
+  }, [runs, activeConversationId]);
 
   const refreshRuns = useCallback(async (signal?: AbortSignal) => {
     setRunsLoading(true);
@@ -75,24 +85,22 @@ function App() {
   }, [liveRunId, refreshRuns]);
 
   useEffect(() => {
-    if (!selectedRunId) {
-      setPreviewTokenSummary(null);
+    if (!activeConversationId || !latestConversationRun) {
+      setConversationTokenSummary(null);
       return;
     }
     const controller = new AbortController();
-    void getRunTimeline(selectedRunId, controller.signal)
+    void getRunTimeline(latestConversationRun.id, controller.signal)
       .then((data) => {
-        setPreviewTokenSummary(data.token_summary ?? summarizeTurnTokens(data.timeline, data.run.input));
+        setConversationTokenSummary(data.token_summary ?? summarizeTurnTokens(data.timeline, data.run.input));
       })
       .catch(() => {
         if (!controller.signal.aborted) {
-          setPreviewTokenSummary(null);
+          setConversationTokenSummary(null);
         }
       });
     return () => controller.abort();
-  }, [selectedRunId]);
-
-  const selectedTurnTokens = useMemo(() => previewTokenSummary, [previewTokenSummary]);
+  }, [activeConversationId, latestConversationRun?.id, latestConversationRun?.ended_at]);
 
   const selectConversation = useCallback(
     (conversationId: string) => {
@@ -113,7 +121,7 @@ function App() {
   const startNewConversation = useCallback(() => {
     setActiveConversationId(undefined);
     setSelectedRunId(undefined);
-    setPreviewTokenSummary(null);
+    setConversationTokenSummary(null);
     setLiveRunId(undefined);
     setInvokeSessionKey((current) => current + 1);
     navigate('/');
@@ -155,7 +163,8 @@ function App() {
                 runsLoading={runsLoading}
                 activeConversationId={activeConversationId}
                 invokeSessionKey={invokeSessionKey}
-                turnTokenSummary={selectedTurnTokens}
+                turnTokenSummary={conversationTokenSummary}
+                idleTurnIndex={latestConversationRun?.turn_index}
                 onConversationChanged={setActiveConversationId}
                 onRunningChange={setInvokeRunning}
                 onRunStarted={setLiveRunId}

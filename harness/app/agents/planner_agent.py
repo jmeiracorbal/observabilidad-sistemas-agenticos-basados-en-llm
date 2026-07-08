@@ -6,10 +6,12 @@ import json
 import re
 from typing import Any
 
+from agents.memory_agent import memory_operation
 from agents.model_call_builder import build_model_call_record
-from agents.observability_helpers import record_decision, utc_now
+from agents.observability_helpers import record_autorepair_flow, record_decision, utc_now
 from agents.registry import action_names
 from llm.gateway import get_model_name, invoke_llm_structured
+from llm.prompt_xml import append_internal_context
 from llm.planner_schemas import PlannerAssessment, PlannerDecision
 from observability.decorators import span
 from observability.models import TokenUsage
@@ -23,6 +25,9 @@ _TIME_KEYWORDS = ("hora", "fecha actual", "tiempo actual", "current time", "curr
 
 _PLANNER_SYSTEM = (
     "Planner del runtime. Elige una acción del catálogo para la petición del usuario. "
+    "Usa memory_agent para guardar o recuperar hechos del usuario en memoria persistente. "
+    "Usa researcher_agent solo para investigación con contexto externo, no para hechos simples del usuario. "
+    "Usa el bloque <internal_context> como contexto; no lo reproduzcas en la salida estructurada. "
     "Incluye hidden_reasoning breve (thought, evidence, decision_impact)."
 )
 
@@ -72,8 +77,17 @@ class PlannerAgent:
                 )
 
                 raw_plan = self._run_decision(planner_span.id, user_input, enriched_context, assessment, conversation)
-                plan = _validate_or_repair_plan(raw_plan, user_input)
-                if plan != raw_plan:
+                plan, repair = _validate_or_repair_plan(raw_plan, user_input)
+                if repair:
+                    record_autorepair_flow(
+                        self._tracer,
+                        planner_span.id,
+                        "PlannerAgent",
+                        user_input,
+                        available_tools=list(_MAIN_ACTIONS),
+                        selected_tools=[] if plan["selected_action"] == "direct_answer" else [plan["selected_action"]],
+                        **repair,
+                    )
                     record_decision(
                         self._tracer,
                         planner_span.id,
@@ -137,7 +151,7 @@ class PlannerAgent:
                 return plan
             except Exception as exc:
                 self._tracer.record_error(planner_span.id, exc)
-                fallback = _validate_or_repair_plan(_fallback_plan(user_input), user_input)
+                fallback, _repair = _validate_or_repair_plan(_fallback_plan(user_input), user_input)
                 record_decision(
                     self._tracer,
                     planner_span.id,
@@ -170,12 +184,13 @@ class PlannerAgent:
         conversation: Any,
     ) -> dict[str, Any]:
         history = str(planning_context.get("conversation_history") or "(sin historial previo)")
-        prompt = (
-            f"Historial:\n{history}\n\n"
-            f"Usuario: {user_input}\n"
-            f"Acciones: {', '.join(_MAIN_ACTIONS)}\n"
-            "Assessment de planificación."
+        system, _ = append_internal_context(
+            _PLANNER_SYSTEM,
+            conversation_history=history,
+            available_actions=", ".join(_MAIN_ACTIONS),
+            planning_task="assessment",
         )
+        prompt = user_input
         record_decision(
             self._tracer,
             span_id,
@@ -185,7 +200,7 @@ class PlannerAgent:
             "PlannerAgent pregunta al LLM qué entiende de la tarea, qué candidatos existen y qué información falta.",
             available_tools=["llm_planner"],
             selected_tools=["llm_planner"],
-            payload={"prompt": prompt, "system": _PLANNER_SYSTEM},
+            payload={"prompt": prompt, "system": system},
         )
         parse_error = None
         output = ""
@@ -194,11 +209,11 @@ class PlannerAgent:
             assessment_model, output, tokens = self._invoke_observed_structured_llm(
                 span_id,
                 prompt,
-                _PLANNER_SYSTEM,
+                system,
                 "planner_assessment",
                 PlannerAssessment,
                 {
-                    "system_prompt": _PLANNER_SYSTEM,
+                    "system_prompt": system,
                     "history": history,
                     "user_message": user_input,
                     "catalog": ", ".join(_MAIN_ACTIONS),
@@ -213,6 +228,22 @@ class PlannerAgent:
             parse_error = str(exc)
             self._tracer.record_error(span_id, exc)
             assessment = _fallback_assessment(user_input, planning_context, parse_error)
+            record_autorepair_flow(
+                self._tracer,
+                span_id,
+                "PlannerAgent",
+                user_input,
+                phase="assessment",
+                conflict_type="structured_output_parse_error",
+                evidence=parse_error,
+                from_value="llm_output_invalid",
+                to_value=str(assessment.get("preliminary_action") or "runtime_fallback"),
+                before={"output": output, "parse_error": parse_error},
+                after=assessment,
+                rationale="PlannerAgent reconstruye el assessment desde señales deterministas del runtime.",
+                available_tools=list(_MAIN_ACTIONS),
+                selected_tools=[assessment["preliminary_action"]] if assessment.get("preliminary_action") not in {None, "direct_answer"} else [],
+            )
             record_decision(
                 self._tracer,
                 span_id,
@@ -258,14 +289,15 @@ class PlannerAgent:
     ) -> dict[str, Any]:
         signals = enriched_context.get("derived_signals", {})
         history = str(enriched_context.get("conversation_history") or "(sin historial previo)")
-        prompt = (
-            f"Historial:\n{history}\n\n"
-            f"Usuario: {user_input}\n"
-            f"Acciones: {', '.join(_MAIN_ACTIONS)}\n"
-            f"Señales: math={signals.get('math_expression')}, time={signals.get('asks_for_time')}\n"
-            f"Preliminar: {assessment.get('preliminary_action')}\n"
-            "Decisión final de planificación."
+        system, _ = append_internal_context(
+            _PLANNER_SYSTEM,
+            conversation_history=history,
+            available_actions=", ".join(_MAIN_ACTIONS),
+            derived_signals=json.dumps(signals, ensure_ascii=False),
+            preliminary_action=str(assessment.get("preliminary_action") or ""),
+            planning_task="decision",
         )
+        prompt = user_input
         record_decision(
             self._tracer,
             span_id,
@@ -275,7 +307,7 @@ class PlannerAgent:
             "PlannerAgent vuelve a consultar al LLM con contexto enriquecido para obtener decisión final.",
             available_tools=["llm_planner"],
             selected_tools=["llm_planner"],
-            payload={"prompt": prompt, "system": _PLANNER_SYSTEM},
+            payload={"prompt": prompt, "system": system},
         )
         parse_error = None
         output = ""
@@ -286,11 +318,11 @@ class PlannerAgent:
             decision_model, output, tokens = self._invoke_observed_structured_llm(
                 span_id,
                 prompt,
-                _PLANNER_SYSTEM,
+                system,
                 "planner_decision",
                 PlannerDecision,
                 {
-                    "system_prompt": _PLANNER_SYSTEM,
+                    "system_prompt": system,
                     "history": history,
                     "user_message": user_input,
                     "catalog": ", ".join(_MAIN_ACTIONS),
@@ -309,6 +341,22 @@ class PlannerAgent:
             self._tracer.record_error(span_id, exc)
             plan = _fallback_plan(user_input, parse_error)
             parsed = _decision_from_plan(plan, parse_error)
+            record_autorepair_flow(
+                self._tracer,
+                span_id,
+                "PlannerAgent",
+                user_input,
+                phase="decision_parse",
+                conflict_type="structured_output_parse_error",
+                evidence=parse_error,
+                from_value="llm_output_invalid",
+                to_value=str(plan.get("selected_action")),
+                before={"output": output, "parse_error": parse_error},
+                after=plan,
+                rationale="PlannerAgent reconstruye la decisión final desde señales deterministas del runtime.",
+                available_tools=list(_MAIN_ACTIONS),
+                selected_tools=[] if plan["selected_action"] == "direct_answer" else [plan["selected_action"]],
+            )
             record_decision(
                 self._tracer,
                 span_id,
@@ -414,6 +462,7 @@ def _enrich_context(planning_context: dict[str, Any], assessment: dict[str, Any]
         "derived_signals": {
             "math_expression": _extract_math_expression(user_input),
             "asks_for_time": _asks_for_time(user_input),
+            "memory_operation": memory_operation(user_input),
             "candidate_actions_from_assessment": assessment.get("candidate_actions", []),
         },
     }
@@ -440,12 +489,21 @@ def _runtime_hidden_reasoning(enriched_context: dict[str, Any]) -> list[dict[str
                 "decision_impact": "Aumenta prioridad de time_agent.",
             }
         )
+    if signals.get("memory_operation"):
+        reasoning.append(
+            {
+                "step": len(reasoning) + 1,
+                "thought": "Se detecta una petición de memoria persistente del usuario.",
+                "evidence": str(signals["memory_operation"]),
+                "decision_impact": "Aumenta prioridad de memory_agent.",
+            }
+        )
     if not reasoning:
         reasoning.append(
             {
                 "step": 1,
-                "thought": "No se detectan señales deterministas de cálculo u hora; se mantiene evaluación del LLM planner.",
-                "evidence": "derived_signals sin math_expression ni asks_for_time",
+                "thought": "No se detectan señales deterministas de dominio; se mantiene evaluación del LLM planner.",
+                "evidence": "derived_signals sin math_expression, asks_for_time ni memory_operation",
                 "decision_impact": "Se conserva la decisión del planner salvo error estructural.",
             }
         )
@@ -458,8 +516,13 @@ def _plan_from_decision(parsed: dict[str, Any], user_input: str) -> dict[str, An
         raise ValueError(f"acción no soportada por planner: {selected_action}")
 
     arguments = _normalize_arguments(parsed.get("arguments"))
-    if selected_action in {"math_agent", "time_agent", "direct_answer"}:
+    if selected_action in {"math_agent", "time_agent", "direct_answer", "memory_agent"}:
         arguments["task"] = user_input
+    if selected_action == "memory_agent":
+        operation = arguments.get("operation") or memory_operation(user_input)
+        if operation is None:
+            raise ValueError("memory_agent requiere operación save o recall")
+        arguments["operation"] = operation
     if selected_action == "researcher_agent" and not (arguments.get("topic") or arguments.get("task")):
         arguments["topic"] = user_input
 
@@ -488,11 +551,13 @@ def _normalize_arguments(value: Any) -> dict[str, Any]:
 def _fallback_assessment(user_input: str, planning_context: dict[str, Any], parse_error: str) -> dict[str, Any]:
     expression = _extract_math_expression(user_input)
     asks_time = _asks_for_time(user_input)
+    memory_op = memory_operation(user_input)
     if expression:
         preliminary_action = "math_agent"
         candidate_actions = [
             {"action": "math_agent", "applicable": True, "reason": f"Se detectó expresión aritmética: {expression}."},
             {"action": "time_agent", "applicable": False, "reason": "No hay petición temporal."},
+            {"action": "memory_agent", "applicable": False, "reason": "No hay petición de memoria."},
             {"action": "researcher_agent", "applicable": False, "reason": "No requiere investigación."},
             {"action": "direct_answer", "applicable": False, "reason": "Existe subagente de dominio más específico."},
         ]
@@ -502,8 +567,19 @@ def _fallback_assessment(user_input: str, planning_context: dict[str, Any], pars
         candidate_actions = [
             {"action": "math_agent", "applicable": False, "reason": "No hay expresión aritmética."},
             {"action": "time_agent", "applicable": True, "reason": "Se detectó una petición de hora/fecha actual."},
+            {"action": "memory_agent", "applicable": False, "reason": "No hay petición de memoria."},
             {"action": "researcher_agent", "applicable": False, "reason": "No requiere investigación."},
             {"action": "direct_answer", "applicable": False, "reason": "Existe subagente temporal más específico."},
+        ]
+        confidence = 0.9
+    elif memory_op:
+        preliminary_action = "memory_agent"
+        candidate_actions = [
+            {"action": "math_agent", "applicable": False, "reason": "No hay expresión aritmética."},
+            {"action": "time_agent", "applicable": False, "reason": "No hay petición temporal."},
+            {"action": "memory_agent", "applicable": True, "reason": f"Se detectó operación de memoria: {memory_op}."},
+            {"action": "researcher_agent", "applicable": False, "reason": "No requiere investigación externa."},
+            {"action": "direct_answer", "applicable": False, "reason": "Existe subagente de memoria más específico."},
         ]
         confidence = 0.9
     else:
@@ -529,7 +605,7 @@ def _fallback_assessment(user_input: str, planning_context: dict[str, Any], pars
             {
                 "step": 2,
                 "thought": "Se evalúan señales deterministas del runtime sin que MainAgent ejecute tools de dominio.",
-                "evidence": f"math_expression={expression!r}, asks_for_time={asks_time}",
+                "evidence": f"math_expression={expression!r}, asks_for_time={asks_time}, memory_operation={memory_op!r}",
                 "decision_impact": f"Preseleccionar {preliminary_action}.",
             },
         ],
@@ -543,6 +619,7 @@ def _fallback_assessment(user_input: str, planning_context: dict[str, Any], pars
 def _fallback_plan(text: str, parse_error: str | None = None) -> dict[str, Any]:
     expression = _extract_math_expression(text)
     asks_time = _asks_for_time(text)
+    memory_op = memory_operation(text)
     if expression:
         selected_action = "math_agent"
         arguments = {"task": text}
@@ -552,6 +629,11 @@ def _fallback_plan(text: str, parse_error: str | None = None) -> dict[str, Any]:
         selected_action = "time_agent"
         arguments = {"task": text}
         reason = "Se detectó una petición inequívoca de hora/fecha actual."
+        confidence = 0.9
+    elif memory_op:
+        selected_action = "memory_agent"
+        arguments = {"task": text, "operation": memory_op}
+        reason = f"Se detectó una petición inequívoca de memoria: {memory_op}."
         confidence = 0.9
     else:
         selected_action = "direct_answer"
@@ -602,9 +684,10 @@ def _decision_from_plan(plan: dict[str, Any], parse_error: str | None) -> dict[s
     }
 
 
-def _validate_or_repair_plan(plan: dict[str, Any], user_input: str) -> dict[str, Any]:
+def _validate_or_repair_plan(plan: dict[str, Any], user_input: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
     expression = _extract_math_expression(user_input)
     asks_time = _asks_for_time(user_input)
+    memory_op = memory_operation(user_input)
 
     if expression and plan.get("selected_action") != "math_agent":
         hidden_reasoning = _hidden_reasoning(plan) + [
@@ -615,7 +698,7 @@ def _validate_or_repair_plan(plan: dict[str, Any], user_input: str) -> dict[str,
                 "decision_impact": "Reparar selected_action a math_agent.",
             }
         ]
-        return {
+        repaired = {
             **plan,
             "selected_action": "math_agent",
             "arguments": {"task": user_input},
@@ -625,6 +708,16 @@ def _validate_or_repair_plan(plan: dict[str, Any], user_input: str) -> dict[str,
                 f"({expression}) y seleccionó MathAgent."
             ),
             "hidden_reasoning": hidden_reasoning,
+        }
+        return repaired, {
+            "phase": "planning",
+            "conflict_type": "selected_action_contradicts_math_signal",
+            "evidence": expression,
+            "from_value": str(plan.get("selected_action")),
+            "to_value": "math_agent",
+            "before": {"selected_action": plan.get("selected_action"), "arguments": plan.get("arguments")},
+            "after": {"selected_action": "math_agent", "arguments": {"task": user_input}},
+            "rationale": repaired["rationale"],
         }
 
     if not expression and asks_time and plan.get("selected_action") != "time_agent":
@@ -636,7 +729,7 @@ def _validate_or_repair_plan(plan: dict[str, Any], user_input: str) -> dict[str,
                 "decision_impact": "Reparar selected_action a time_agent.",
             }
         ]
-        return {
+        repaired = {
             **plan,
             "selected_action": "time_agent",
             "arguments": {"task": user_input},
@@ -644,10 +737,51 @@ def _validate_or_repair_plan(plan: dict[str, Any], user_input: str) -> dict[str,
             "rationale": "PlannerAgent validó que la entrada solicita hora/fecha actual y seleccionó TimeAgent.",
             "hidden_reasoning": hidden_reasoning,
         }
+        return repaired, {
+            "phase": "planning",
+            "conflict_type": "selected_action_contradicts_time_signal",
+            "evidence": "keyword temporal en user_input",
+            "from_value": str(plan.get("selected_action")),
+            "to_value": "time_agent",
+            "before": {"selected_action": plan.get("selected_action"), "arguments": plan.get("arguments")},
+            "after": {"selected_action": "time_agent", "arguments": {"task": user_input}},
+            "rationale": repaired["rationale"],
+        }
+
+    if memory_op and plan.get("selected_action") != "memory_agent":
+        hidden_reasoning = _hidden_reasoning(plan) + [
+            {
+                "step": len(_hidden_reasoning(plan)) + 1,
+                "thought": "La decisión del LLM contradice una petición de memoria inequívoca.",
+                "evidence": memory_op,
+                "decision_impact": "Reparar selected_action a memory_agent.",
+            }
+        ]
+        repaired = {
+            **plan,
+            "selected_action": "memory_agent",
+            "arguments": {"task": user_input, "operation": memory_op},
+            "confidence": max(_safe_confidence(plan.get("confidence")), 0.9),
+            "rationale": (
+                f"PlannerAgent validó que la entrada solicita memoria ({memory_op}) "
+                "y seleccionó MemoryAgent."
+            ),
+            "hidden_reasoning": hidden_reasoning,
+        }
+        return repaired, {
+            "phase": "planning",
+            "conflict_type": "selected_action_contradicts_memory_signal",
+            "evidence": memory_op,
+            "from_value": str(plan.get("selected_action")),
+            "to_value": "memory_agent",
+            "before": {"selected_action": plan.get("selected_action"), "arguments": plan.get("arguments")},
+            "after": {"selected_action": "memory_agent", "arguments": {"task": user_input, "operation": memory_op}},
+            "rationale": repaired["rationale"],
+        }
 
     selected_action = plan.get("selected_action")
     if selected_action == "math_agent" and not expression:
-        return _repair_invalid_subagent_selection(
+        repaired = _repair_invalid_subagent_selection(
             plan,
             user_input,
             from_action="math_agent",
@@ -657,9 +791,19 @@ def _validate_or_repair_plan(plan: dict[str, Any], user_input: str) -> dict[str,
                 "aritmética inequívoca; se usará respuesta directa."
             ),
         )
+        return repaired, {
+            "phase": "planning",
+            "conflict_type": "selected_action_without_math_signal",
+            "evidence": "derived_signals sin math_expression",
+            "from_value": "math_agent",
+            "to_value": "direct_answer",
+            "before": {"selected_action": "math_agent", "arguments": plan.get("arguments")},
+            "after": {"selected_action": "direct_answer", "arguments": {"task": user_input}},
+            "rationale": repaired["rationale"],
+        }
 
     if selected_action == "time_agent" and not asks_time:
-        return _repair_invalid_subagent_selection(
+        repaired = _repair_invalid_subagent_selection(
             plan,
             user_input,
             from_action="time_agent",
@@ -669,8 +813,40 @@ def _validate_or_repair_plan(plan: dict[str, Any], user_input: str) -> dict[str,
                 "se usará respuesta directa."
             ),
         )
+        return repaired, {
+            "phase": "planning",
+            "conflict_type": "selected_action_without_time_signal",
+            "evidence": "derived_signals sin asks_for_time",
+            "from_value": "time_agent",
+            "to_value": "direct_answer",
+            "before": {"selected_action": "time_agent", "arguments": plan.get("arguments")},
+            "after": {"selected_action": "direct_answer", "arguments": {"task": user_input}},
+            "rationale": repaired["rationale"],
+        }
 
-    return plan
+    if selected_action == "memory_agent" and not memory_op:
+        repaired = _repair_invalid_subagent_selection(
+            plan,
+            user_input,
+            from_action="memory_agent",
+            evidence="derived_signals sin memory_operation",
+            rationale=(
+                "PlannerAgent rechazó memory_agent porque la entrada no solicita "
+                "guardar ni recuperar memoria; se usará respuesta directa."
+            ),
+        )
+        return repaired, {
+            "phase": "planning",
+            "conflict_type": "selected_action_without_memory_signal",
+            "evidence": "derived_signals sin memory_operation",
+            "from_value": "memory_agent",
+            "to_value": "direct_answer",
+            "before": {"selected_action": "memory_agent", "arguments": plan.get("arguments")},
+            "after": {"selected_action": "direct_answer", "arguments": {"task": user_input}},
+            "rationale": repaired["rationale"],
+        }
+
+    return plan, None
 
 
 def _repair_invalid_subagent_selection(

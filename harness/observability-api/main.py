@@ -1122,6 +1122,9 @@ def _decision_flow(row: dict, actor: str) -> tuple[str, str]:
         "planning_decision_verified",
         "hidden_reasoning_generated",
         "planning_finalized",
+        "autorepair_conflict_detected",
+        "autorepair_decision",
+        "autorepair_applied",
     }:
         return "PlannerAgent", "PlannerAgent"
     if stage == "planner_request":
@@ -1155,6 +1158,10 @@ def _decision_flow(row: dict, actor: str) -> tuple[str, str]:
         return "MainAgent", "LLM Final"
     if stage in {"final_model_response", "final_model_observation"}:
         return "LLM Final", "MainAgent"
+    if stage in {"autorepair_conflict_detected", "autorepair_decision", "autorepair_applied"}:
+        return actor, actor
+    if stage in {"retry_conflict_detected", "retry_decision", "retry_applied"}:
+        return actor, actor
     if stage == "final_response":
         return "MainAgent", "User"
     if stage == "memory_observation":
@@ -1180,6 +1187,12 @@ def _decision_event_role(stage: str) -> str:
         "planning_decision_parse_repair",
         "planning_decision_verified",
         "hidden_reasoning_generated",
+        "retry_conflict_detected",
+        "retry_decision",
+        "retry_applied",
+        "autorepair_conflict_detected",
+        "autorepair_decision",
+        "autorepair_applied",
     }:
         return "annotation"
     return "annotation"
@@ -1198,6 +1211,30 @@ def _decision_description(row: dict) -> str:
             return _truncate(str(response), 300)
     if payload.get("hidden_reasoning"):
         return _truncate(f"Razonamiento oculto: {len(payload.get('hidden_reasoning') or [])} pasos registrados.", 300)
+    if stage == "autorepair_conflict_detected":
+        return _truncate(
+            f"Conflicto {payload.get('conflict_type')}: {payload.get('from_value')} → {payload.get('to_value')}",
+            300,
+        )
+    if stage == "retry_conflict_detected":
+        return _truncate(
+            f"Contrato incumplido ({payload.get('violation_type')}): se esperaba {payload.get('evidence')}",
+            300,
+        )
+    if stage == "retry_decision":
+        return _truncate(str(payload.get("rationale") or "Se decide reintentar con prompt correctivo."), 300)
+    if stage == "retry_applied":
+        return _truncate(
+            f"Reintento {payload.get('next_attempt')}/{payload.get('max_attempts')} programado",
+            300,
+        )
+    if stage == "autorepair_decision":
+        return _truncate(str(payload.get("rationale") or "Se decide aplicar autoreparación determinista."), 300)
+    if stage == "autorepair_applied":
+        return _truncate(
+            f"Corrección aplicada: {payload.get('from_value')} → {payload.get('to_value')}",
+            300,
+        )
     return str(row.get("rationale") or "")
 
 
@@ -1226,6 +1263,30 @@ def _decision_content(row: dict) -> dict:
         content["response"] = payload.get("response")
     if stage in {"final_model_response", "final_model_observation"} and "output" in payload:
         content["response"] = payload.get("output")
+    if stage.startswith("retry_"):
+        content["phase"] = payload.get("phase")
+        content["violation_type"] = payload.get("violation_type")
+        content["evidence"] = payload.get("evidence")
+        content["from_value"] = payload.get("from_value")
+        content["attempt"] = payload.get("attempt")
+        content["max_attempts"] = payload.get("max_attempts")
+        content["next_attempt"] = payload.get("next_attempt")
+        if "before" in payload:
+            content["before"] = payload.get("before")
+        if "after" in payload:
+            content["after"] = payload.get("after")
+    if stage.startswith("autorepair_"):
+        content["phase"] = payload.get("phase")
+        content["conflict_type"] = payload.get("conflict_type")
+        content["evidence"] = payload.get("evidence")
+        content["from_value"] = payload.get("from_value")
+        content["to_value"] = payload.get("to_value")
+        if "before" in payload:
+            content["before"] = payload.get("before")
+        if "after" in payload:
+            content["after"] = payload.get("after")
+        if "result" in payload:
+            content["result"] = payload.get("result")
     return content
 
 
@@ -1305,6 +1366,12 @@ def _decision_relation(stage: str) -> str:
         "planning_decision_parse_repair": "repara decisión final",
         "planning_decision_verified": "verifica decisión",
         "hidden_reasoning_generated": "genera razonamiento oculto",
+        "autorepair_conflict_detected": "detecta conflicto",
+        "autorepair_decision": "decide autoreparar",
+        "autorepair_applied": "aplica autoreparación",
+        "retry_conflict_detected": "detecta incumplimiento de contrato",
+        "retry_decision": "decide reintentar",
+        "retry_applied": "aplica reintento",
         "planning_finalized": "finaliza planificación",
         "decision_validation": "valida decisión",
         "fallback_event": "fallback",
@@ -1368,7 +1435,7 @@ def _truncate(value: str, max_length: int) -> str:
     return value if len(value) <= max_length else f"{value[: max_length - 1]}…"
 
 
-_FINAL_PURPOSE = "final_response"
+_FINAL_PURPOSES = {"final_response", "final_response_retry"}
 
 
 def _estimate_tokens(text: str) -> int:
@@ -1437,7 +1504,7 @@ def _summarize_turn_tokens(user_input: str, model_calls: list[dict], decision_ev
         if isinstance(metadata, dict) and metadata.get("context_window"):
             context_window = int(metadata["context_window"])
 
-        if purpose == _FINAL_PURPOSE:
+        if purpose in _FINAL_PURPOSES:
             final_output_tokens = output_tokens
             user_input_tokens = _breakdown_value(metadata, "user_message") or _estimate_tokens(user_input)
             continue
