@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any
 
-from agents.memory_agent import memory_operation
+from agents.memory_agent import memory_operation, resolve_memory_operation
 from agents.model_call_builder import build_model_call_record
 from agents.observability_helpers import record_autorepair_flow, record_decision, utc_now
 from agents.registry import action_names
@@ -226,7 +226,6 @@ class PlannerAgent:
             assessment = _normalize_assessment(assessment_model.model_dump(), user_input, planning_context)
         except Exception as exc:
             parse_error = str(exc)
-            self._tracer.record_error(span_id, exc)
             assessment = _fallback_assessment(user_input, planning_context, parse_error)
             record_autorepair_flow(
                 self._tracer,
@@ -338,7 +337,6 @@ class PlannerAgent:
             plan = _plan_from_decision(parsed, user_input)
         except Exception as exc:
             parse_error = str(exc)
-            self._tracer.record_error(span_id, exc)
             plan = _fallback_plan(user_input, parse_error)
             parsed = _decision_from_plan(plan, parse_error)
             record_autorepair_flow(
@@ -516,15 +514,17 @@ def _plan_from_decision(parsed: dict[str, Any], user_input: str) -> dict[str, An
         raise ValueError(f"acción no soportada por planner: {selected_action}")
 
     arguments = _normalize_arguments(parsed.get("arguments"))
-    if selected_action in {"math_agent", "time_agent", "direct_answer", "memory_agent"}:
-        arguments["task"] = user_input
     if selected_action == "memory_agent":
-        operation = arguments.get("operation") or memory_operation(user_input)
+        operation = resolve_memory_operation(arguments.get("operation"), user_input)
         if operation is None:
-            raise ValueError("memory_agent requiere operación save o recall")
-        arguments["operation"] = operation
+            selected_action = "direct_answer"
+            arguments = {"task": user_input}
+        else:
+            arguments = {"task": user_input, "operation": operation}
+    elif selected_action in {"math_agent", "time_agent", "direct_answer"}:
+        arguments = {**arguments, "task": user_input}
     if selected_action == "researcher_agent" and not (arguments.get("topic") or arguments.get("task")):
-        arguments["topic"] = user_input
+        arguments = {**arguments, "topic": user_input}
 
     hidden_reasoning = _hidden_reasoning(parsed)
     return {

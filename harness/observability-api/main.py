@@ -1379,6 +1379,7 @@ def _decision_relation(stage: str) -> str:
         "subagent_received": "recibe delegación",
         "subagent_call_response": "devuelve observación",
         "direct_answer_selected": "responde directo",
+        "memory_response_selected": "usa respuesta de memoria",
         "tool_call_request": "solicita tool",
         "tool_observation": "devuelve resultado",
         "model_call_request": "solicita modelo",

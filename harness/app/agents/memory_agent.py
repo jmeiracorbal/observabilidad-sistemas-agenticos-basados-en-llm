@@ -20,6 +20,10 @@ _MEMORY_SAVE_PATTERNS = (
     "guárdalo en memoria",
     "guardalo en memoria",
     "persiste en memoria",
+    "guárdalo",
+    "guardalo",
+    "guárdame",
+    "guardame",
     "recuérdame",
     "recuerdame",
     "recuerda que",
@@ -28,21 +32,37 @@ _MEMORY_SAVE_PATTERNS = (
 _MEMORY_RECALL_PATTERNS = (
     "cómo me llamo",
     "como me llamo",
+    "sabes cómo me llamo",
+    "sabes como me llamo",
     "cuál es mi nombre",
     "cual es mi nombre",
     "qué sabes de mí",
     "que sabes de mi",
+    "recuerda mi nombre",
     "recuerdas mi nombre",
     "recuerdas cómo me llamo",
     "recuerdas como me llamo",
+    "recuerda cómo me llamo",
+    "recuerda como me llamo",
 )
+
+MemoryOperation = Literal["save", "recall"]
+
+_MEMORY_OPERATION_ALIASES: dict[str, MemoryOperation] = {
+    "save": "save",
+    "write": "save",
+    "store": "save",
+    "persist": "save",
+    "recall": "recall",
+    "read": "recall",
+    "search": "recall",
+    "retrieve": "recall",
+}
 
 _NAME_FACT = re.compile(
     r"(?:me llamo|mi nombre es)\s+([^\.\!\?\n,;]+)",
     re.IGNORECASE,
 )
-
-MemoryOperation = Literal["save", "recall"]
 
 
 def memory_operation(text: str) -> MemoryOperation | None:
@@ -52,6 +72,16 @@ def memory_operation(text: str) -> MemoryOperation | None:
     if any(pattern in normalized for pattern in _MEMORY_RECALL_PATTERNS):
         return "recall"
     return None
+
+
+def resolve_memory_operation(raw_operation: object, user_input: str) -> MemoryOperation | None:
+    if isinstance(raw_operation, str):
+        normalized = raw_operation.strip().lower()
+        if normalized in _MEMORY_OPERATION_ALIASES:
+            return _MEMORY_OPERATION_ALIASES[normalized]
+        if normalized in {"save", "recall"}:
+            return normalized  # type: ignore[return-value]
+    return memory_operation(user_input)
 
 
 def requests_memory_save(text: str) -> bool:
@@ -92,7 +122,7 @@ class MemoryAgent:
             return self._run_recall(memory_span.id, task)
 
     def _run_save(self, span_id: str, task: str) -> dict:
-        title, content = _build_memory_fact(task)
+        title, content, response = _build_memory_fact(task)
         record_decision(
             self._tracer,
             span_id,
@@ -128,7 +158,7 @@ class MemoryAgent:
             "owner_agent": "MemoryAgent",
             "tool": "memory.save",
             "arguments": {"task": task, "operation": "save", "title": title},
-            "result": content,
+            "result": response,
         }
         record_decision(
             self._tracer,
@@ -218,9 +248,12 @@ def _build_memory_fact(task: str) -> tuple[str, str]:
     name_match = _NAME_FACT.search(task)
     if name_match:
         name = name_match.group(1).strip()
-        return f"nombre: {name}", f"El usuario se llama {name}."
+        title = f"nombre: {name}"
+        content = f"El usuario se llama {name}."
+        response = f"Te llamas {name}. Lo he guardado en memoria."
+        return title, content, response
     normalized = task.strip()
-    return "hecho usuario", normalized
+    return "hecho usuario", normalized, f"He guardado en memoria: {normalized}"
 
 
 def _recall_query(task: str) -> str:
@@ -233,4 +266,8 @@ def _recall_query(task: str) -> str:
 def _format_recall_results(results: list[str]) -> str:
     if not results:
         return "No encontré nada en memoria sobre eso."
+    for entry in results:
+        name_match = re.search(r"El usuario se llama ([^\.\n]+)", entry, re.IGNORECASE)
+        if name_match:
+            return f"Te llamas {name_match.group(1).strip()}."
     return "Según la memoria: " + " · ".join(results)

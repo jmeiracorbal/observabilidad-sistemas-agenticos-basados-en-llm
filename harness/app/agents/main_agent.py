@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agents.model_call_builder import build_model_call_record
-from agents.memory_agent import MemoryAgent, memory_operation
+from agents.memory_agent import MemoryAgent, memory_operation, resolve_memory_operation
 from agents.math_agent import MathAgent
 from agents.observability_helpers import record_autorepair_flow, record_decision, record_retry_flow, utc_now
 from agents.planner_agent import PlannerAgent, _PLANNER_SYSTEM, _validate_or_repair_plan
@@ -148,8 +148,8 @@ class MainAgent:
                     selected_tools=[] if planner_plan["selected_action"] == "direct_answer" else [planner_plan["selected_action"]],
                     payload={"source_agent": "PlannerAgent", "plan": planner_plan},
                 )
-                plan = _validate_plan_contract(planner_plan, user_input)
-                plan, repair = _validate_or_repair_plan(plan, user_input)
+                plan, repair = _validate_or_repair_plan(planner_plan, user_input)
+                plan = _validate_plan_contract(plan, user_input)
                 if repair:
                     record_autorepair_flow(
                         self._tracer,
@@ -175,7 +175,20 @@ class MainAgent:
                 )
 
                 observation = self._execute_selected_action(run.id, main_span.id, user_input, plan)
-                final_response = self._produce_final_response(main_span.id, user_input, plan, observation, conversation)
+                if selected_action == "memory_agent":
+                    final_response = str(observation.get("result"))
+                    record_decision(
+                        self._tracer,
+                        main_span.id,
+                        "MainAgent",
+                        "memory_response_selected",
+                        user_input,
+                        "MainAgent usa la observación de MemoryAgent como respuesta final sin reformular con LLM.",
+                        available_tools=[selected_action],
+                        payload={"response": final_response, "observation": observation},
+                    )
+                else:
+                    final_response = self._produce_final_response(main_span.id, user_input, plan, observation, conversation)
                 self._conversations.append_message(
                     conversation_id=conversation.conversation_id,
                     run_id=run.id,
@@ -256,11 +269,9 @@ class MainAgent:
             return observation
 
         if selected_action == "memory_agent":
-            operation = memory_operation(user_input)
+            operation = resolve_memory_operation(arguments.get("operation"), user_input)
             if operation is None:
-                operation = arguments.get("operation")
-            if operation not in {"save", "recall"}:
-                raise ValueError(f"operación de memoria no soportada: {operation}")
+                raise ValueError(f"operación de memoria no soportada: {arguments.get('operation')}")
             record_decision(
                 self._tracer,
                 span_id,
@@ -721,17 +732,19 @@ def _validate_plan_contract(plan: dict[str, Any], user_input: str) -> dict[str, 
         raise ValueError(f"acción no disponible en AgentRegistry: {selected_action}")
 
     arguments = _normalize_arguments(plan.get("arguments"))
-    if selected_action in {"math_agent", "time_agent", "direct_answer", "memory_agent"}:
-        arguments = {**arguments, "task": user_input}
     if selected_action == "memory_agent":
-        operation = arguments.get("operation") or memory_operation(user_input)
+        operation = resolve_memory_operation(arguments.get("operation"), user_input)
         if operation is None:
-            raise ValueError("memory_agent requiere operación save o recall derivable del mensaje")
-        arguments = {**arguments, "operation": operation}
+            selected_action = "direct_answer"
+            arguments = {"task": user_input}
+        else:
+            arguments = {**arguments, "task": user_input, "operation": operation}
+    elif selected_action in {"math_agent", "time_agent", "direct_answer"}:
+        arguments = {**arguments, "task": user_input}
     if selected_action == "researcher_agent" and not (arguments.get("topic") or arguments.get("task")):
         arguments = {**arguments, "topic": user_input}
 
-    return {**plan, "arguments": arguments}
+    return {**plan, "selected_action": selected_action, "arguments": arguments}
 
 
 def _normalize_arguments(value: Any) -> dict[str, Any]:

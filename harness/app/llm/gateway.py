@@ -4,7 +4,7 @@
 
 import os
 from collections.abc import Callable
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
@@ -132,6 +132,53 @@ def invoke_llm(prompt: str, system: str | None = None, purpose: str | None = Non
     raise ValueError(f"MODEL_PROVIDER no soportado: {model_provider}")
 
 
+def _unwrap_tool_args(args: dict[str, Any]) -> dict[str, Any]:
+    if "properties" in args and isinstance(args["properties"], dict):
+        return dict(args["properties"])
+    return args
+
+
+def _parse_structured_response(response: dict[str, Any], schema: type[T]) -> T | None:
+    parsed = response.get("parsed")
+    if parsed is not None:
+        return parsed
+
+    raw_message = response.get("raw")
+    tool_calls = getattr(raw_message, "tool_calls", None) or []
+    for tool_call in tool_calls:
+        raw_args = tool_call.get("args") if isinstance(tool_call, dict) else getattr(tool_call, "args", None)
+        if not isinstance(raw_args, dict):
+            continue
+        try:
+            return schema.model_validate(_unwrap_tool_args(raw_args))
+        except Exception:
+            continue
+
+    content = getattr(raw_message, "content", None)
+    if isinstance(content, str) and content.strip():
+        try:
+            return schema.model_validate_json(content)
+        except Exception:
+            pass
+    return None
+
+
+def _invoke_gateway_structured(messages: list, schema: type[T]) -> tuple[T, str, TokenUsage]:
+    methods = ("json_schema", "function_calling")
+    last_error: object = None
+    for method in methods:
+        structured_llm = _chat_model().with_structured_output(schema, method=method, include_raw=True)
+        response = structured_llm.invoke(messages)
+        parsed = _parse_structured_response(response, schema)
+        if parsed is not None:
+            raw_message = response["raw"]
+            output = parsed.model_dump_json(ensure_ascii=False)
+            tokens = _token_usage_from_message(raw_message)
+            return parsed, output, tokens
+        last_error = response.get("parsing_error")
+    raise ValueError(f"el proveedor no devolvió salida estructurada válida: {last_error}")
+
+
 def invoke_llm_structured(prompt: str, system: str | None, schema: type[T], purpose: str) -> tuple[T, str, TokenUsage]:
     model_provider = os.environ["MODEL_PROVIDER"]
     _emit_llm_started(purpose)
@@ -145,16 +192,7 @@ def invoke_llm_structured(prompt: str, system: str | None, schema: type[T], purp
 
     if model_provider == "gateway":
         messages = _build_messages(prompt, system)
-        structured_llm = _chat_model().with_structured_output(schema, method="function_calling", include_raw=True)
-        response = structured_llm.invoke(messages)
-        parsed = response["parsed"]
-        if parsed is None:
-            parsing_error = response.get("parsing_error")
-            raise ValueError(f"el proveedor no devolvió salida estructurada válida: {parsing_error}")
-
-        raw_message = response["raw"]
-        output = parsed.model_dump_json(ensure_ascii=False)
-        tokens = _token_usage_from_message(raw_message)
+        parsed, output, tokens = _invoke_gateway_structured(messages, schema)
         _emit_llm_completed(purpose, output, tokens)
         return parsed, output, tokens
 
