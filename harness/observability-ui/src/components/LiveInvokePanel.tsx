@@ -303,8 +303,10 @@ export function LiveInvokePanel({
       internal_output_tokens: 0,
       context_window: config.contextWindow,
       remaining_input_tokens: null,
-      output_reserve_tokens: config.outputReserve,
+      output_reserve_tokens: null,
     };
+
+    const liveOutputTokens = responseStream?.output_tokens ?? 0;
 
     if (state.remainingInputTokens !== undefined && state.outputReserveTokens !== undefined) {
       return {
@@ -312,6 +314,7 @@ export function LiveInvokePanel({
         context_window: base.context_window || config.contextWindow,
         remaining_input_tokens: state.remainingInputTokens,
         output_reserve_tokens: state.outputReserveTokens,
+        final_output_tokens: Math.max(base.final_output_tokens, liveOutputTokens),
       };
     }
 
@@ -319,9 +322,10 @@ export function LiveInvokePanel({
       ...base,
       context_window: base.context_window || config.contextWindow,
       remaining_input_tokens: base.remaining_input_tokens,
-      output_reserve_tokens: base.output_reserve_tokens ?? config.outputReserve,
+      output_reserve_tokens: base.output_reserve_tokens,
+      final_output_tokens: Math.max(base.final_output_tokens, liveOutputTokens),
     };
-  }, [contextSummary, state.remainingInputTokens, state.outputReserveTokens]);
+  }, [contextSummary, state.remainingInputTokens, state.outputReserveTokens, responseStream?.output_tokens]);
 
   return (
     <section className="panel live-invoke-panel">
