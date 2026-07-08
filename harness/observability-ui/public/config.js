@@ -1,0 +1,1 @@
+window.__OBSERVABILITY_UI_CONFIG__ = window.__OBSERVABILITY_UI_CONFIG__ || {};

@@ -1,0 +1,154 @@
+services:
+  agent-api:
+    build:
+      context: ./harness/app
+      dockerfile: Dockerfile
+    container_name: tfg-agent-api
+    environment:
+      APP_ENV: local
+
+      MODEL_PROVIDER: gateway
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_MASTER_KEY: sk-local-dev
+      LLM_MODEL: local-llama
+
+      OBSERVABILITY_API_URL: http://observability-api:8000
+
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: observability
+      POSTGRES_USER: observability
+      POSTGRES_PASSWORD: observability
+
+      REDIS_URL: redis://redis:6379/0
+
+      MNEMO_PROJECT: tfg-poc
+      CORS_ALLOW_ORIGINS: http://localhost:3000,http://localhost:5173
+      LLM_CONTEXT_WINDOW: "128000"
+      LLM_OUTPUT_TOKEN_RESERVE: "4000"
+    volumes:
+      - mnemo_data:/root/.mnemo
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      observability-api:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+
+  observability-api:
+    build:
+      context: ./harness/observability-api
+      dockerfile: Dockerfile
+    container_name: tfg-observability-api
+    environment:
+      APP_ENV: local
+
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: observability
+      POSTGRES_USER: observability
+      POSTGRES_PASSWORD: observability
+
+      REDIS_URL: redis://redis:6379/0
+      CORS_ALLOW_ORIGINS: http://localhost:3000,http://localhost:5173
+      LLM_CONTEXT_WINDOW: "128000"
+      LLM_OUTPUT_TOKEN_RESERVE: "4000"
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  observability-ui:
+    build:
+      context: ./harness/observability-ui
+      dockerfile: Dockerfile
+    container_name: tfg-observability-ui
+    environment:
+      OBSERVABILITY_API_URL: http://localhost:8001
+      AGENT_API_URL: http://localhost:8000
+      APP_TITLE: Observabilidad
+      LLM_CONTEXT_WINDOW: "128000"
+      LLM_OUTPUT_TOKEN_RESERVE: "4000"
+    ports:
+      - "3000:80"
+    depends_on:
+      observability-api:
+        condition: service_healthy
+
+  litellm:
+    image: ghcr.io/berriai/litellm:v1.83.7-stable
+    container_name: tfg-litellm
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml
+    environment:
+      LITELLM_MASTER_KEY: sk-local-dev
+    command: ["--config", "/app/config.yaml"]
+    depends_on:
+      ollama:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16
+    container_name: tfg-postgres
+    environment:
+      POSTGRES_DB: observability
+      POSTGRES_USER: observability
+      POSTGRES_PASSWORD: observability
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U observability -d observability"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    container_name: tfg-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: tfg-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  postgres_data:
+  redis_data:
+  ollama_data:
+  mnemo_data:

@@ -1,0 +1,17 @@
+model_list:
+  - model_name: local-llama
+    litellm_params:
+      model: ollama/llama3.2:3b
+      api_base: http://ollama:11434
+      additional_drop_params: ["parallel_tool_calls"]
+  # ejemplos para añadir proveedores cloud:
+  # - model_name: gpt-4o-mini
+  #   litellm_params:
+  #     model: openai/gpt-4o-mini
+  #     api_key: os.environ/OPENAI_API_KEY
+
+litellm_settings:
+  drop_params: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
