@@ -261,7 +261,7 @@ Ubicada en `harness/observability-ui/`.
 
 | Área | Vista | Captura | Descripción |
 |---|---|---|---|
-| Conversación | Invoke en vivo | ![Invoke en vivo con planificación](docs/demo/demo-01.png) | Barra de contexto, planificación en vivo (análisis/decisión) y respuesta final. |
+| Conversación | Invoke en vivo | ![Invoke en vivo con planificación](docs/demo/demo-01-planificacion.png) | Barra de contexto, planificación en vivo (análisis/decisión) y respuesta final. |
 | Conversación | Historial | ![Historial de conversación](docs/demo/demo-05-conversacion.png) | Historial lateral, invoke, barra de contexto y tarjeta resumen del turno. |
 | Detalle del turno | Actividad | ![Actividad e inspector](docs/demo/demo-02-actividad.png) | Timeline jerárquico por agente e inspector del paso seleccionado. |
 | Detalle del turno | Diagrama | ![Diagrama de artefactos](docs/demo/demo-03-diagrama.png) | Grafo React Flow con nodos tipados y leyenda. |
