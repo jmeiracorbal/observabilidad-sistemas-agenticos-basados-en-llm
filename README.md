@@ -252,6 +252,7 @@ Ubicada en `harness/observability-ui/`.
 - React + Vite + TypeScript.
 - Vista de lista de ejecuciones.
 - Resumen del run seleccionado.
+- Invoke en vivo con planificación (análisis/decisión), pestaña **Respuesta** y métricas del turno (mensaje, pipeline, tramos, decisiones, errores).
 - Timeline secuencial de spans, decisiones, llamadas a modelo, herramientas, memoria y errores.
 - Eventos de decisión del agente: recepción, AgentRegistry, planner LLM, validación estructural, delegación, catálogo de tools propias, selección interna de tool, ejecución, observación y respuesta.
 - Diagrama de artefactos con React Flow construido desde el timeline real, no desde un árbol agregado.
@@ -263,6 +264,11 @@ Ubicada en `harness/observability-ui/`.
 |---|---|---|---|
 | Conversación | Invoke en vivo | ![Invoke en vivo con planificación](docs/demo/demo-01-planificacion.png) | Barra de contexto, planificación en vivo (análisis/decisión) y respuesta final. |
 | Conversación | Historial | ![Historial de conversación](docs/demo/demo-05-conversacion.png) | Historial lateral, invoke, barra de contexto y tarjeta resumen del turno. |
+| Conversación | Respuesta (cálculo) | ![Respuesta directa a cálculo](docs/demo/demo-06.png) | Planificación en dos pasos, respuesta final (`2+2`) y métricas del turno (pipeline, tramos, decisiones). |
+| Conversación | Respuesta (math_agent) | ![Respuesta con MathAgent](docs/demo/demo-07.png) | Decisión `math_agent`, resultado aritmético e historial de ejecuciones dentro de la misma conversación. |
+| Conversación | Respuesta (memoria) | ![Respuesta con recall de memoria](docs/demo/demo-10.png) | Recall de un hecho del usuario (`Pepe`) con planificación visible y métricas sin errores. |
 | Detalle del turno | Actividad | ![Actividad e inspector](docs/demo/demo-02-actividad.png) | Timeline jerárquico por agente e inspector del paso seleccionado. |
+| Detalle del turno | Actividad (model_call) | ![Inspector de model_call](docs/demo/demo-08.png) | Detalle de `local-llama` en el planner: tokens, ventana de contexto, historial y salida JSON. |
+| Detalle del turno | Actividad (memoria) | ![Evento de memoria en timeline](docs/demo/demo-09.png) | `memory.search` del ResearcherAgent contra mnemo con `results_count` y payload del plugin. |
 | Detalle del turno | Diagrama | ![Diagrama de artefactos](docs/demo/demo-03-diagrama.png) | Grafo React Flow con nodos tipados y leyenda. |
 | Detalle del turno | Planificación | ![Planificación estructurada](docs/demo/demo-04-planificacion.png) | Assessment, decisión y plan final con JSON expandible. |
