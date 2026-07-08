@@ -256,3 +256,13 @@ Ubicada en `harness/observability-ui/`.
 - Eventos de decisión del agente: recepción, AgentRegistry, planner LLM, validación estructural, delegación, catálogo de tools propias, selección interna de tool, ejecución, observación y respuesta.
 - Diagrama de artefactos con React Flow construido desde el timeline real, no desde un árbol agregado.
 - Inspector JSON para payloads reales.
+
+### Capturas
+
+| Área | Vista | Captura | Descripción |
+|---|---|---|---|
+| Conversación | Invoke en vivo | ![Invoke en vivo con planificación](docs/demo/demo-01.png) | Barra de contexto, planificación en vivo (análisis/decisión) y respuesta final. |
+| Conversación | Historial | ![Historial de conversación](docs/demo/demo-05-conversacion.png) | Historial lateral, invoke, barra de contexto y tarjeta resumen del turno. |
+| Detalle del turno | Actividad | ![Actividad e inspector](docs/demo/demo-02-actividad.png) | Timeline jerárquico por agente e inspector del paso seleccionado. |
+| Detalle del turno | Diagrama | ![Diagrama de artefactos](docs/demo/demo-03-diagrama.png) | Grafo React Flow con nodos tipados y leyenda. |
+| Detalle del turno | Planificación | ![Planificación estructurada](docs/demo/demo-04-planificacion.png) | Assessment, decisión y plan final con JSON expandible. |
