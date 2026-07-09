@@ -144,7 +144,13 @@ h2 { font-size: 1.15rem; margin-bottom: 0; }
 .summary-cards--tokens .metric strong { font-size: 1.6rem; }
 .summary-cards .metric small { display: block; margin-top: 6px; font-size: .74rem; line-height: 1.35; }
 .conversation-context-bar { padding: 8px 16px 10px; margin-bottom: 0; border-bottom: 1px solid rgba(148, 163, 184, .12); background: rgba(2, 6, 23, .35); }
-.conversation-context-bar__summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; color: #94a3b8; font-size: .68rem; line-height: 1; }
+.conversation-context-bar__summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; color: #94a3b8; font-size: .68rem; line-height: 1; flex-wrap: wrap; }
+.conversation-context-bar__legend { display: inline-flex; align-items: center; gap: 5px; }
+.conversation-context-bar__swatch { width: 8px; height: 8px; border-radius: 999px; flex-shrink: 0; box-shadow: 0 0 0 1px rgba(15, 23, 42, .45); }
+.conversation-context-bar__legend--conv .conversation-context-bar__swatch { background: linear-gradient(135deg, #38bdf8, #0284c7); }
+.conversation-context-bar__legend--reserve .conversation-context-bar__swatch { background: linear-gradient(135deg, #a78bfa, #7c3aed); }
+.conversation-context-bar__legend--free .conversation-context-bar__swatch { background: linear-gradient(135deg, #4ade80, #16a34a); }
+.conversation-context-bar__percent { color: #cbd5e1; font-weight: 700; }
 .context-window-bar { display: flex; width: 100%; height: 8px; border-radius: 999px; overflow: hidden; border: 1px solid rgba(148, 163, 184, .14); background: rgba(2, 6, 23, .55); }
 .context-window-bar__used { display: block; height: 100%; background: linear-gradient(90deg, #38bdf8, #0284c7); transition: width .25s ease; }
 .context-window-bar__output { display: block; height: 100%; background: linear-gradient(90deg, #a78bfa, #7c3aed); transition: width .25s ease; }

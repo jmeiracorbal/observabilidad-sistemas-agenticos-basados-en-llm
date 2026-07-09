@@ -141,4 +141,7 @@ export interface TurnTokenSummary {
   context_window: number;
   remaining_input_tokens: number | null;
   output_reserve_tokens: number | null;
+  conversation_input_tokens?: number | null;
+  history_message_count?: number | null;
+  turn_index?: number | null;
 }

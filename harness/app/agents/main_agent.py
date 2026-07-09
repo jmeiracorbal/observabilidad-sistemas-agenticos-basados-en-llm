@@ -66,6 +66,8 @@ class ConversationContext:
     history_text: str
     remaining_input_tokens: int
     output_reserve_tokens: int
+    estimated_input_tokens: int
+    history_message_count: int
     summarized: bool
     truncated: bool
 
@@ -93,6 +95,8 @@ class MainAgent:
                 "turn_index": conversation.turn_index,
                 "remaining_input_tokens": conversation.remaining_input_tokens,
                 "output_reserve_tokens": conversation.output_reserve_tokens,
+                "estimated_input_tokens": conversation.estimated_input_tokens,
+                "history_message_count": conversation.history_message_count,
             },
         )
         try:
@@ -369,6 +373,8 @@ class MainAgent:
             history_text=context_result.history_text,
             remaining_input_tokens=context_result.remaining_input_tokens,
             output_reserve_tokens=context_result.output_reserve_tokens,
+            estimated_input_tokens=context_result.estimated_input_tokens,
+            history_message_count=len(existing_messages),
             summarized=context_result.summarized,
             truncated=context_result.truncated,
         )
@@ -399,6 +405,8 @@ class MainAgent:
                 "turn_index": conversation.turn_index,
                 "remaining_input_tokens": conversation.remaining_input_tokens,
                 "output_reserve_tokens": conversation.output_reserve_tokens,
+                "estimated_input_tokens": conversation.estimated_input_tokens,
+                "history_message_count": conversation.history_message_count,
                 "history_present": bool(conversation.history_text.strip()),
             },
         )

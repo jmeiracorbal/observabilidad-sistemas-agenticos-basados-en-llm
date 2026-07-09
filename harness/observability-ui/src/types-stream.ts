@@ -22,6 +22,8 @@ export interface InvokeStreamState {
   turnIndex?: number;
   remainingInputTokens?: number;
   outputReserveTokens?: number;
+  estimatedInputTokens?: number;
+  historyMessageCount?: number;
   message?: string;
   response?: string;
   error?: string;

@@ -209,6 +209,8 @@ export function LiveInvokePanel({
               turnIndex,
               remainingInputTokens: Number(data.remaining_input_tokens ?? 0),
               outputReserveTokens: Number(data.output_reserve_tokens ?? 0),
+              estimatedInputTokens: Number(data.estimated_input_tokens ?? 0),
+              historyMessageCount: Number(data.history_message_count ?? 0),
             }));
             if (conversationId) {
               onConversationChanged(conversationId);
@@ -330,6 +332,9 @@ export function LiveInvokePanel({
       context_window: config.contextWindow,
       remaining_input_tokens: null,
       output_reserve_tokens: null,
+      conversation_input_tokens: null,
+      history_message_count: null,
+      turn_index: idleTurnIndex ?? null,
     };
 
     const liveOutputTokens = responseStream?.output_tokens ?? 0;
@@ -340,6 +345,13 @@ export function LiveInvokePanel({
         context_window: base.context_window || config.contextWindow,
         remaining_input_tokens: state.remainingInputTokens,
         output_reserve_tokens: state.outputReserveTokens,
+        conversation_input_tokens:
+          state.estimatedInputTokens && state.estimatedInputTokens > 0
+            ? state.estimatedInputTokens
+            : base.conversation_input_tokens,
+        history_message_count:
+          state.historyMessageCount !== undefined ? state.historyMessageCount : base.history_message_count,
+        turn_index: state.turnIndex ?? base.turn_index ?? idleTurnIndex ?? null,
         final_output_tokens: Math.max(base.final_output_tokens, liveOutputTokens),
       };
     }
@@ -349,9 +361,21 @@ export function LiveInvokePanel({
       context_window: base.context_window || config.contextWindow,
       remaining_input_tokens: base.remaining_input_tokens,
       output_reserve_tokens: base.output_reserve_tokens,
+      conversation_input_tokens: base.conversation_input_tokens,
+      history_message_count: base.history_message_count,
+      turn_index: base.turn_index ?? idleTurnIndex ?? null,
       final_output_tokens: Math.max(base.final_output_tokens, liveOutputTokens),
     };
-  }, [contextSummary, state.remainingInputTokens, state.outputReserveTokens, responseStream?.output_tokens]);
+  }, [
+    contextSummary,
+    idleTurnIndex,
+    state.remainingInputTokens,
+    state.outputReserveTokens,
+    state.estimatedInputTokens,
+    state.historyMessageCount,
+    state.turnIndex,
+    responseStream?.output_tokens,
+  ]);
 
   return (
     <section className="panel live-invoke-panel">

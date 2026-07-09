@@ -1465,6 +1465,9 @@ def _context_from_run(model_calls: list[dict], decision_events: list[dict]) -> d
             "context_window": 0,
             "remaining_input_tokens": payload.get("remaining_input_tokens"),
             "output_reserve_tokens": payload.get("output_reserve_tokens"),
+            "estimated_input_tokens": payload.get("estimated_input_tokens"),
+            "history_message_count": payload.get("history_message_count"),
+            "turn_index": payload.get("turn_index"),
         }
 
     for row in model_calls:
@@ -1524,4 +1527,7 @@ def _summarize_turn_tokens(user_input: str, model_calls: list[dict], decision_ev
         "context_window": context_window,
         "remaining_input_tokens": context.get("remaining_input_tokens"),
         "output_reserve_tokens": context.get("output_reserve_tokens"),
+        "conversation_input_tokens": context.get("estimated_input_tokens"),
+        "history_message_count": context.get("history_message_count"),
+        "turn_index": context.get("turn_index"),
     }

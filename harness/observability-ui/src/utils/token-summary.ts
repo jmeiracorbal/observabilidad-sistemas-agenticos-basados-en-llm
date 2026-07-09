@@ -26,20 +26,38 @@ function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(trimmed.length / 4));
 }
 
-function contextFromTimeline(timeline: TimelineItem[]): Pick<TurnTokenSummary, 'context_window' | 'remaining_input_tokens' | 'output_reserve_tokens'> {
+function readNumber(value: unknown): number | null {
+  return typeof value === 'number' ? value : null;
+}
+
+function contextFromTimeline(
+  timeline: TimelineItem[],
+): Pick<
+  TurnTokenSummary,
+  | 'context_window'
+  | 'remaining_input_tokens'
+  | 'output_reserve_tokens'
+  | 'conversation_input_tokens'
+  | 'history_message_count'
+  | 'turn_index'
+> {
   for (const item of timeline) {
     if (item.kind !== 'decision') {
       continue;
     }
-    const decision = (item.payload as { decision?: { stage?: string; payload?: Record<string, unknown> } } | undefined)?.decision;
+    const decision = (item.payload as { decision?: { stage?: string; payload?: Record<string, unknown> } } | undefined)
+      ?.decision;
     if (decision?.stage !== 'context_window_evaluated') {
       continue;
     }
     const payload = decision.payload ?? {};
     return {
       context_window: 0,
-      remaining_input_tokens: typeof payload.remaining_input_tokens === 'number' ? payload.remaining_input_tokens : null,
-      output_reserve_tokens: typeof payload.output_reserve_tokens === 'number' ? payload.output_reserve_tokens : null,
+      remaining_input_tokens: readNumber(payload.remaining_input_tokens),
+      output_reserve_tokens: readNumber(payload.output_reserve_tokens),
+      conversation_input_tokens: readNumber(payload.estimated_input_tokens),
+      history_message_count: readNumber(payload.history_message_count),
+      turn_index: readNumber(payload.turn_index),
     };
   }
 
@@ -54,10 +72,11 @@ function contextFromTimeline(timeline: TimelineItem[]): Pick<TurnTokenSummary, '
     }
     return {
       context_window: typeof metadata.context_window === 'number' ? metadata.context_window : 0,
-      remaining_input_tokens:
-        typeof metadata.remaining_input_tokens === 'number' ? metadata.remaining_input_tokens : null,
-      output_reserve_tokens:
-        typeof metadata.output_reserve_tokens === 'number' ? metadata.output_reserve_tokens : null,
+      remaining_input_tokens: readNumber(metadata.remaining_input_tokens),
+      output_reserve_tokens: readNumber(metadata.output_reserve_tokens),
+      conversation_input_tokens: null,
+      history_message_count: null,
+      turn_index: null,
     };
   }
 
@@ -65,6 +84,9 @@ function contextFromTimeline(timeline: TimelineItem[]): Pick<TurnTokenSummary, '
     context_window: 0,
     remaining_input_tokens: null,
     output_reserve_tokens: null,
+    conversation_input_tokens: null,
+    history_message_count: null,
+    turn_index: null,
   };
 }
 
@@ -116,5 +138,8 @@ export function summarizeTurnTokens(timeline: TimelineItem[], userInput: string)
     context_window,
     remaining_input_tokens: context.remaining_input_tokens,
     output_reserve_tokens: context.output_reserve_tokens,
+    conversation_input_tokens: context.conversation_input_tokens,
+    history_message_count: context.history_message_count,
+    turn_index: context.turn_index,
   };
 }
